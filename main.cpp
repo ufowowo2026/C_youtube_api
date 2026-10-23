@@ -22,7 +22,9 @@ size_t append_response_body(char* data, size_t size, size_t count, void* user_da
 }
 
 crow::response json_error(int status, const std::string& message) {
-    crow::response response(status, "{\"error\":\"" + message + "\"}");
+    crow::json::wvalue body;
+    body["error"] = message;
+    crow::response response(status, body.dump());
     response.set_header("Content-Type", "application/json; charset=utf-8");
     return response;
 }
@@ -43,6 +45,72 @@ struct YouTubeResponse {
     long http_status;
     std::string body;
 };
+
+struct YouTubeApiError {
+    std::string status;
+    std::string reason;
+    std::string message;
+};
+
+std::string read_json_string(const crow::json::rvalue& object, const char* key) {
+    if (!object || object.t() != crow::json::type::Object || !object.has(key)) {
+        return {};
+    }
+
+    const auto& value = object[key];
+    if (value.t() != crow::json::type::String) {
+        return {};
+    }
+    return std::string(value.s());
+}
+
+YouTubeApiError parse_youtube_api_error(const std::string& body) {
+    const auto document = crow::json::load(body);
+    if (!document || document.t() != crow::json::type::Object || !document.has("error")) {
+        return {};
+    }
+
+    const auto& error = document["error"];
+    if (error.t() != crow::json::type::Object) {
+        return {};
+    }
+
+    YouTubeApiError details{
+        read_json_string(error, "status"),
+        {},
+        read_json_string(error, "message")
+    };
+
+    if (error.has("errors")) {
+        const auto& errors = error["errors"];
+        if (errors.t() == crow::json::type::List && errors.size() > 0) {
+            details.reason = read_json_string(errors[0], "reason");
+        }
+    }
+    return details;
+}
+
+std::string sanitize_api_error_detail(std::string value, const std::string& api_key) {
+    if (!api_key.empty()) {
+        size_t position = 0;
+        while ((position = value.find(api_key, position)) != std::string::npos) {
+            value.replace(position, api_key.size(), "[redacted]");
+            position += sizeof("[redacted]") - 1;
+        }
+    }
+
+    for (char& character : value) {
+        if (character == '\r' || character == '\n' || character == '\t') {
+            character = ' ';
+        }
+    }
+    constexpr size_t max_detail_length = 500;
+    if (value.size() > max_detail_length) {
+        value.resize(max_detail_length);
+        value += "...";
+    }
+    return value;
+}
 
 YouTubeResponse request_youtube_api(
     const std::string& endpoint,
@@ -90,14 +158,39 @@ YouTubeResponse request_youtube_api(
     return result;
 }
 
-crow::response forward_youtube_response(const YouTubeResponse& result) {
+crow::response forward_youtube_response(const YouTubeResponse& result, const std::string& api_key) {
     if (result.request_status != CURLE_OK) {
         std::cerr << "YouTube API 請求失敗：" << curl_easy_strerror(result.request_status) << std::endl;
         return json_error(502, "無法連線至 YouTube 服務，請稍後再試。");
     }
     if (result.http_status < 200 || result.http_status >= 300) {
-        std::cerr << "YouTube API 回傳 HTTP " << result.http_status << std::endl;
-        return json_error(502, "YouTube 服務暫時無法使用，請確認 API 設定或稍後再試。");
+        const YouTubeApiError details = parse_youtube_api_error(result.body);
+        const std::string status = sanitize_api_error_detail(details.status, api_key);
+        const std::string reason = sanitize_api_error_detail(details.reason, api_key);
+        const std::string message = sanitize_api_error_detail(details.message, api_key);
+
+        std::cerr << "YouTube API 回傳 HTTP " << result.http_status;
+        if (!status.empty()) {
+            std::cerr << "; status=" << status;
+        }
+        if (!reason.empty()) {
+            std::cerr << "; reason=" << reason;
+        }
+        if (!message.empty()) {
+            std::cerr << "; message=" << message;
+        }
+        std::cerr << std::endl;
+
+        std::string client_message = "YouTube API 回傳 HTTP " + std::to_string(result.http_status);
+        if (!reason.empty()) {
+            client_message += " (" + reason + ")";
+        } else if (!status.empty()) {
+            client_message += " (" + status + ")";
+        }
+        if (!message.empty()) {
+            client_message += "：" + message;
+        }
+        return json_error(502, client_message);
     }
 
     crow::response response(result.body);
@@ -118,7 +211,7 @@ crow::response handle_youtube_api(
         std::cerr << "無法建立 YouTube API HTTP 用戶端。" << std::endl;
         return json_error(500, "伺服器暫時無法處理要求，請稍後再試。");
     }
-    return forward_youtube_response(result);
+    return forward_youtube_response(result, api_key);
 }
 
 const char* HOME_PAGE = R"html(<!DOCTYPE html>
