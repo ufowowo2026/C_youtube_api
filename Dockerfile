@@ -8,6 +8,8 @@ RUN apt-get update && apt-get install -y \
     git \
     libasio-dev \
     libcurl4-openssl-dev \
+    libpq-dev \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app
@@ -20,6 +22,8 @@ FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y \
     libstdc++6 \
     libcurl4 \
+    libpq5 \
+    libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

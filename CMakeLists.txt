@@ -16,6 +16,15 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Crow)
 
 find_package(CURL REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_package(PostgreSQL REQUIRED)
 
 add_executable(youtube_search_app main.cpp)
-target_link_libraries(youtube_search_app PRIVATE Crow::Crow CURL::libcurl)
+target_link_libraries(
+    youtube_search_app
+    PRIVATE
+    Crow::Crow
+    CURL::libcurl
+    OpenSSL::Crypto
+    PostgreSQL::PostgreSQL
+)
