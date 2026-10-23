@@ -933,16 +933,22 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     footer a { margin-right: 14px; color: #ccc; }
     .authorization-notice { max-width: 650px; padding: 12px; border-left: 3px solid #f44; background: #181818; color: #ccc; line-height: 1.6; }
     #videos { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 28px 16px; }
-    .video-card { min-width: 0; }
+    .video-card { display: flex; min-width: 0; flex-direction: column; }
     .video-card img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 12px; background: #222; }
     .video-card .thumbnail-button { position: relative; display: block; width: 100%; margin: 0; padding: 0; overflow: hidden; border-radius: 12px; background: transparent; }
     .video-card .thumbnail-button::after { content: "▶"; position: absolute; top: 50%; left: 50%; display: grid; width: 54px; height: 40px; transform: translate(-50%, -50%); place-items: center; border-radius: 10px; color: #fff; background: rgba(0, 0, 0, .72); font-size: 19px; pointer-events: none; }
     .video-card .thumbnail-button:hover { background: transparent; }
     .video-card .thumbnail-button:hover img { filter: brightness(.8); }
     .video-card .thumbnail-button:focus-visible { outline: 2px solid #f1f1f1; outline-offset: 3px; }
-    .video-card h2 { margin: 10px 0 6px; font-size: 16px; line-height: 1.4; }
+    .video-card h2 { display: -webkit-box; min-height: 2.8em; margin: 10px 0 6px; overflow: hidden; font-size: 16px; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
     .video-card p { margin: 4px 0; color: #aaa; line-height: 1.45; }
+    .video-card p:not(.description) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .video-card button { margin-top: 6px; padding: 8px 14px; border-radius: 18px; }
+    .video-card .description { display: -webkit-box; min-height: 2.9em; overflow: hidden; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+    .video-card .description.expanded { display: block; overflow: visible; white-space: pre-wrap; }
+    .video-card .description-toggle { align-self: flex-start; min-height: 32px; margin-top: 0; padding: 4px 0; color: #aaa; background: transparent; border-radius: 0; text-align: left; }
+    .video-card .description-toggle:hover { color: #fff; background: transparent; }
+    .video-card .description-toggle[aria-hidden="true"] { visibility: hidden; }
     body.player-open { overflow: hidden; }
     #player-panel { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; background: rgba(0, 0, 0, .92); }
     #player-toolbar { display: flex; justify-content: flex-end; width: min(100%, 960px); }
@@ -968,8 +974,8 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       #videos { grid-template-columns: minmax(0, 1fr); gap: 24px; }
       .video-card h2 { margin-top: 8px; font-size: 16px; }
       .video-card p { font-size: 13px; }
-      .video-card p:nth-of-type(2) { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
       .video-card button { min-height: 40px; }
+      .video-card .description-toggle { min-height: 40px; }
       .playlist-form { max-width: none; }
       .playlist-items-form { max-width: none; }
       .playlist-items-form button { min-height: 44px; }
@@ -1117,13 +1123,29 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         const duration = formatDuration(item.contentDetails && item.contentDetails.duration);
         channel.textContent = [snippet.channelTitle, duration].filter(Boolean).join(' · ');
         const description = document.createElement('p');
-        description.textContent = snippet.description || '';
+        description.className = 'description';
+        description.id = 'video-description-' + videoId;
+        description.textContent = snippet.description || '沒有提供影片說明。';
+        const descriptionToggle = document.createElement('button');
+        descriptionToggle.type = 'button';
+        descriptionToggle.className = 'description-toggle';
+        descriptionToggle.textContent = '顯示更多';
+        descriptionToggle.setAttribute('aria-controls', description.id);
+        descriptionToggle.setAttribute('aria-expanded', 'false');
+        descriptionToggle.disabled = true;
+        descriptionToggle.setAttribute('aria-hidden', 'true');
+        descriptionToggle.addEventListener('click', () => {
+          const expanded = descriptionToggle.getAttribute('aria-expanded') !== 'true';
+          description.classList.toggle('expanded', expanded);
+          descriptionToggle.setAttribute('aria-expanded', String(expanded));
+          descriptionToggle.textContent = expanded ? '收合' : '顯示更多';
+        });
         const playButton = document.createElement('button');
         playButton.type = 'button';
         playButton.textContent = '播放';
         playButton.addEventListener('click', event => playVideo(videoId, event.currentTarget));
 
-        card.append(thumbnailButton, title, channel, description, playButton);
+        card.append(thumbnailButton, title, channel, description, descriptionToggle, playButton);
         const addButton = document.createElement('button');
         addButton.type = 'button';
         addButton.className = 'add-playlist-button';
@@ -1183,6 +1205,9 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         });
         card.append(addButton);
         videos.append(card);
+        const hasLongDescription = description.scrollHeight > description.clientHeight + 1;
+        descriptionToggle.disabled = !hasLongDescription;
+        descriptionToggle.setAttribute('aria-hidden', String(!hasLongDescription));
       }
       if (!videos.children.length) status.textContent = '找不到符合的影片。';
       else status.textContent = '';
