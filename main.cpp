@@ -252,9 +252,13 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     .video-card h2 { margin: 10px 0 6px; font-size: 16px; line-height: 1.4; }
     .video-card p { margin: 4px 0; color: #aaa; line-height: 1.45; }
     .video-card button { margin-top: 6px; padding: 8px 14px; border-radius: 18px; }
-    #player-panel { position: relative; margin: 0 0 26px; }
-    #player { width: 100%; aspect-ratio: 16 / 9; border: 0; background: #000; }
-    #close-player { position: absolute; top: 10px; right: 10px; padding: 8px 12px; border-radius: 18px; }
+    body.player-open { overflow: hidden; }
+    #player-panel { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; background: rgba(0, 0, 0, .92); }
+    #player-toolbar { display: flex; justify-content: flex-end; width: min(100%, 960px); }
+    #player { width: min(100%, 960px); max-height: calc(100vh - 100px); aspect-ratio: 16 / 9; overflow: hidden; border-radius: 12px; background: #000; box-shadow: 0 16px 60px rgba(0, 0, 0, .5); }
+    #player iframe { display: block; width: 100%; height: 100%; border: 0; }
+    #close-player { padding: 9px 16px; border: 1px solid #555; border-radius: 20px; background: #272727; }
+    #close-player:hover { background: #3a3a3a; }
     [hidden] { display: none !important; }
     @media (max-width: 700px) {
       header { gap: 12px; padding: 0 12px; }
@@ -282,8 +286,10 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       <button type="button" data-view="search">搜尋結果</button>
     </nav>
     <main>
-      <section id="player-panel" hidden>
-        <button id="close-player" type="button">關閉播放器</button>
+      <section id="player-panel" role="dialog" aria-modal="true" aria-label="影片播放器" hidden>
+        <div id="player-toolbar">
+          <button id="close-player" type="button">關閉播放器</button>
+        </div>
         <div id="player"></div>
       </section>
       <h1 id="heading">熱門影片</h1>
@@ -304,13 +310,23 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     let player = null;
     let playerReady = false;
     let pendingVideoId = null;
+    let playerTrigger = null;
 
     function closeVideoPlayer() {
       pendingVideoId = null;
       playerPanel.hidden = true;
+      document.body.classList.remove('player-open');
       if (playerReady && player) player.stopVideo();
+      if (playerTrigger && playerTrigger.isConnected) playerTrigger.focus();
+      playerTrigger = null;
     }
 
+    playerPanel.addEventListener('click', event => {
+      if (event.target === playerPanel) closeVideoPlayer();
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && !playerPanel.hidden) closeVideoPlayer();
+    });
     function formatDuration(value) {
       const match = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(value || '');
       if (!match) return '';
@@ -339,12 +355,14 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       });
     };
 
-    function playVideo(videoId) {
+    function playVideo(videoId, trigger) {
       if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) return;
+      playerTrigger = trigger;
       playerPanel.hidden = false;
+      document.body.classList.add('player-open');
       pendingVideoId = videoId;
       if (playerReady && player) player.loadVideoById(videoId);
-      playerPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      closePlayer.focus();
     }
 
     function displayVideos(items) {
@@ -360,7 +378,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         thumbnailButton.type = 'button';
         thumbnailButton.className = 'thumbnail-button';
         thumbnailButton.setAttribute('aria-label', '播放影片：' + (snippet.title || '未命名影片'));
-        thumbnailButton.addEventListener('click', () => playVideo(videoId));
+        thumbnailButton.addEventListener('click', event => playVideo(videoId, event.currentTarget));
         const thumbnail = document.createElement('img');
         const thumbnails = snippet.thumbnails || {};
         thumbnail.src = (thumbnails.medium && thumbnails.medium.url) ||
@@ -380,7 +398,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         const playButton = document.createElement('button');
         playButton.type = 'button';
         playButton.textContent = '播放';
-        playButton.addEventListener('click', () => playVideo(videoId));
+        playButton.addEventListener('click', event => playVideo(videoId, event.currentTarget));
 
         card.append(thumbnailButton, title, channel, description, playButton);
         videos.append(card);
