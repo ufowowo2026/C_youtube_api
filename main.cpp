@@ -1074,7 +1074,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       player = new YT.Player('player', {
         width: '100%',
         videoId: '',
-        playerVars: { playsinline: 1, rel: 0 },
+        playerVars: { playsinline: 1, rel: 0, origin: window.location.origin },
         events: {
           onReady: () => {
             playerReady = true;
@@ -1619,7 +1619,7 @@ int main() {
         crow::response response(HOME_PAGE);
         response.set_header("Content-Type", "text/html; charset=utf-8");
         response.set_header("Cache-Control", "no-store");
-        response.set_header("Referrer-Policy", "no-referrer");
+        response.set_header("Referrer-Policy", "strict-origin-when-cross-origin");
         return response;
     });
 
