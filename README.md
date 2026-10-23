@@ -51,11 +51,11 @@ $key
 
 ### 常見登入錯誤
 
-- **按鈕顯示「登入未設定」**：`/api/auth/status` 的 `configured` 為 `false`。確認 `DATABASE_URL`、Google 三項變數與 64 字元十六進位 `TOKEN_ENCRYPTION_KEY` 均已設好，且部署已完成。
+- **按鈕顯示「登入未設定」**：`/api/auth/status` 的 `configured` 為 `false`。檢查同一回應的 `configurationError` 欄位，或在 Render Web Service 的 **Logs** 查看 `OAuth configuration error:` 訊息。日誌只會列出缺少的變數名稱或金鑰格式要求，不會記錄任何設定值。
 - **`redirect_uri_mismatch`**：確認 Google Cloud 和 Render 的 callback URL 都是 `https://c-youtube-api.onrender.com/auth/callback`，包含 `https`、網域及路徑且沒有尾端斜線。
 - **應用程式存取遭拒或測試者無法登入**：確認 Audience 為 External，且登入帳戶已加入 Test users；若要正式開放，完成 Google 要求的驗證。
 - **登入後提示授權不足**：重新登入並同意 YouTube 播放清單管理權限；確認已啟用 YouTube Data API v3。
-- **資料庫錯誤**：確認 `DATABASE_URL` 使用同一 Render workspace 中 Postgres 的 Internal Database URL，並查看 Render Web Service logs。
+- **資料庫錯誤**：查看 Render Web Service logs。連線失敗會提示檢查 `DATABASE_URL`、Postgres 狀態及網路；資料表初始化失敗會記錄 PostgreSQL SQLSTATE。確認 `DATABASE_URL` 使用同一 Render workspace 中 Postgres 的 Internal Database URL。
 
 遺失或更換 `TOKEN_ENCRYPTION_KEY` 會使已保存的 refresh token 無法解密；輪替前必須先規劃重新授權或安全遷移。
 

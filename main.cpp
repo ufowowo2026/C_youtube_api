@@ -476,8 +476,14 @@ crow::response authentication_required() {
     return json_error(401, "請先使用 Google 帳戶登入並授權 YouTube 播放清單。");
 }
 
-crow::response database_unavailable() {
-    std::cerr << "OAuth 資料庫目前無法使用。" << std::endl;
+crow::response database_unavailable(PGconn* connection = nullptr) {
+    if (connection != nullptr && PQstatus(connection) != CONNECTION_OK) {
+        std::cerr << "OAuth database connection failed; verify DATABASE_URL, the Render Postgres status, and network access."
+                  << std::endl;
+    } else {
+        std::cerr << "OAuth database operation failed; check the preceding PostgreSQL diagnostic and database availability."
+                  << std::endl;
+    }
     return json_error(503, "登入服務暫時無法使用，請稍後再試。");
 }
 
@@ -591,13 +597,36 @@ crow::response handle_youtube_api(
     return forward_youtube_response(result, api_key);
 }
 
-bool oauth_configuration_ready() {
+std::vector<std::string> oauth_configuration_issues() {
+    std::vector<std::string> issues;
+    for (const char* name : {
+             "DATABASE_URL",
+             "GOOGLE_CLIENT_ID",
+             "GOOGLE_CLIENT_SECRET",
+             "GOOGLE_REDIRECT_URI"}) {
+        if (environment_value(name).empty()) {
+            issues.push_back(std::string(name) + " is not set.");
+        }
+    }
+
     std::array<unsigned char, 32> key{};
-    return !environment_value("DATABASE_URL").empty() &&
-        !environment_value("GOOGLE_CLIENT_ID").empty() &&
-        !environment_value("GOOGLE_CLIENT_SECRET").empty() &&
-        !environment_value("GOOGLE_REDIRECT_URI").empty() &&
-        read_encryption_key(key);
+    const std::string configured_key = environment_value("TOKEN_ENCRYPTION_KEY");
+    if (configured_key.empty()) {
+        issues.push_back("TOKEN_ENCRYPTION_KEY is not set.");
+    } else if (!read_encryption_key(key)) {
+        issues.push_back("TOKEN_ENCRYPTION_KEY must be exactly 64 hexadecimal characters.");
+    }
+    return issues;
+}
+
+void log_oauth_configuration_issues(const std::vector<std::string>& issues) {
+    for (const auto& issue : issues) {
+        std::cerr << "OAuth configuration error: " << issue << std::endl;
+    }
+}
+
+bool oauth_configuration_ready() {
+    return oauth_configuration_issues().empty();
 }
 
 bool create_oauth_state(PGconn* connection, const std::string& state) {
@@ -834,7 +863,7 @@ bool prepare_user_api(
         return false;
     }
     if (!database.connected() || !ensure_auth_schema(database.get())) {
-        error = database_unavailable();
+        error = database_unavailable(database.get());
         return false;
     }
     if (!lookup_session(database.get(), request, session)) {
@@ -1584,11 +1613,13 @@ int main() {
     });
 
     CROW_ROUTE(app, "/auth/google").methods(crow::HTTPMethod::GET)([] {
-        if (!oauth_configuration_ready()) {
+        const auto configuration_issues = oauth_configuration_issues();
+        if (!configuration_issues.empty()) {
+            log_oauth_configuration_issues(configuration_issues);
             return json_error(503, "Google OAuth、Postgres 或 TOKEN_ENCRYPTION_KEY 尚未設定。");
         }
         PgConnection database;
-        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable();
+        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable(database.get());
 
         std::string state;
         if (!random_url_token(state) || !create_oauth_state(database.get(), state)) {
@@ -1617,9 +1648,13 @@ int main() {
     });
 
     CROW_ROUTE(app, "/auth/callback").methods(crow::HTTPMethod::GET)([](const crow::request& request) {
-        if (!oauth_configuration_ready()) return json_error(503, "Google OAuth 尚未完成伺服器設定。");
+        const auto configuration_issues = oauth_configuration_issues();
+        if (!configuration_issues.empty()) {
+            log_oauth_configuration_issues(configuration_issues);
+            return json_error(503, "Google OAuth 尚未完成伺服器設定。");
+        }
         PgConnection database;
-        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable();
+        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable(database.get());
 
         const std::string state = request.url_params.get("state") == nullptr
             ? std::string() : std::string(request.url_params.get("state"));
@@ -1687,9 +1722,17 @@ int main() {
 
     CROW_ROUTE(app, "/api/auth/status").methods(crow::HTTPMethod::GET)([](const crow::request& request) {
         crow::json::wvalue body;
-        body["configured"] = oauth_configuration_ready();
+        const auto configuration_issues = oauth_configuration_issues();
+        body["configured"] = configuration_issues.empty();
         body["authenticated"] = false;
-        if (!oauth_configuration_ready()) {
+        if (!configuration_issues.empty()) {
+            log_oauth_configuration_issues(configuration_issues);
+            std::string message;
+            for (const auto& issue : configuration_issues) {
+                if (!message.empty()) message += " ";
+                message += issue;
+            }
+            body["configurationError"] = message;
             crow::response response(body.dump());
             response.set_header("Content-Type", "application/json; charset=utf-8");
             response.set_header("Cache-Control", "no-store");
@@ -1697,7 +1740,7 @@ int main() {
         }
 
         PgConnection database;
-        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable();
+        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable(database.get());
         AccountSession session;
         if (lookup_session(database.get(), request, session)) {
             body["authenticated"] = true;
@@ -1715,7 +1758,7 @@ int main() {
 
     CROW_ROUTE(app, "/api/auth/logout").methods(crow::HTTPMethod::POST)([](const crow::request& request) {
         PgConnection database;
-        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable();
+        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable(database.get());
         AccountSession session;
         if (!lookup_session(database.get(), request, session)) return authentication_required();
         if (!validate_csrf(request, session)) return json_error(403, "安全驗證失敗，請重新載入頁面。");
@@ -1724,7 +1767,7 @@ int main() {
             database.get(),
             "DELETE FROM web_sessions WHERE session_hash=$1",
             {sha256_hex(cookie_value(request, "app_session"))});
-        if (!deleted || PQresultStatus(deleted.get()) != PGRES_COMMAND_OK) return database_unavailable();
+        if (!deleted || PQresultStatus(deleted.get()) != PGRES_COMMAND_OK) return database_unavailable(database.get());
         crow::response response("{\"ok\":true}");
         response.set_header("Content-Type", "application/json; charset=utf-8");
         response.set_header("Cache-Control", "no-store");
@@ -1736,7 +1779,7 @@ int main() {
     CROW_ROUTE(app, "/api/auth/disconnect").methods(crow::HTTPMethod::POST)([](const crow::request& request) {
         if (!oauth_configuration_ready()) return json_error(503, "Google OAuth 尚未完成伺服器設定。");
         PgConnection database;
-        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable();
+        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable(database.get());
         AccountSession session;
         if (!lookup_session(database.get(), request, session)) return authentication_required();
         if (!validate_csrf(request, session)) return json_error(403, "安全驗證失敗，請重新載入頁面。");
@@ -1773,7 +1816,7 @@ int main() {
             database.get(),
             "DELETE FROM google_accounts WHERE google_sub=$1",
             {session.google_sub});
-        if (!deleted || PQresultStatus(deleted.get()) != PGRES_COMMAND_OK) return database_unavailable();
+        if (!deleted || PQresultStatus(deleted.get()) != PGRES_COMMAND_OK) return database_unavailable(database.get());
         crow::response response("{\"ok\":true}");
         response.set_header("Content-Type", "application/json; charset=utf-8");
         response.set_header("Cache-Control", "no-store");
