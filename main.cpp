@@ -140,6 +140,9 @@ YouTubeResponse request_youtube_api(
         curl_easy_cleanup(curl);
         return {CURLE_URL_MALFORMAT, 0, {}};
     }
+    if (url.back() != '?') {
+        url += '&';
+    }
     url += "key=" + escaped_key;
 
     YouTubeResponse result{CURLE_OK, 0, {}};
