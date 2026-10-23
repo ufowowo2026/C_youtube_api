@@ -245,6 +245,10 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     #videos { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 28px 16px; }
     .video-card { min-width: 0; }
     .video-card img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 12px; background: #222; }
+    .video-card .thumbnail-button { display: block; width: 100%; margin: 0; padding: 0; border-radius: 12px; background: transparent; }
+    .video-card .thumbnail-button:hover { background: transparent; }
+    .video-card .thumbnail-button:hover img { filter: brightness(.8); }
+    .video-card .thumbnail-button:focus-visible { outline: 2px solid #f1f1f1; outline-offset: 3px; }
     .video-card h2 { margin: 10px 0 6px; font-size: 16px; line-height: 1.4; }
     .video-card p { margin: 4px 0; color: #aaa; line-height: 1.45; }
     .video-card button { margin-top: 6px; padding: 8px 14px; border-radius: 18px; }
@@ -352,6 +356,11 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
 
         const card = document.createElement('article');
         card.className = 'video-card';
+        const thumbnailButton = document.createElement('button');
+        thumbnailButton.type = 'button';
+        thumbnailButton.className = 'thumbnail-button';
+        thumbnailButton.setAttribute('aria-label', '播放影片：' + (snippet.title || '未命名影片'));
+        thumbnailButton.addEventListener('click', () => playVideo(videoId));
         const thumbnail = document.createElement('img');
         const thumbnails = snippet.thumbnails || {};
         thumbnail.src = (thumbnails.medium && thumbnails.medium.url) ||
@@ -359,6 +368,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
           (thumbnails.default && thumbnails.default.url) || '';
         thumbnail.alt = '';
         thumbnail.loading = 'lazy';
+        thumbnailButton.append(thumbnail);
 
         const title = document.createElement('h2');
         title.textContent = snippet.title || '未命名影片';
@@ -372,7 +382,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         playButton.textContent = '播放';
         playButton.addEventListener('click', () => playVideo(videoId));
 
-        card.append(thumbnail, title, channel, description, playButton);
+        card.append(thumbnailButton, title, channel, description, playButton);
         videos.append(card);
       }
       if (!videos.children.length) status.textContent = '找不到符合的影片。';
