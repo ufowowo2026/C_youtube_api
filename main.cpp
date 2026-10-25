@@ -915,6 +915,10 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     main { min-width: 0; max-width: 1500px; width: 100%; margin: 0 auto; padding: 22px 28px 50px; }
     h1 { margin: 0 0 18px; font-size: 22px; }
     #status { min-height: 20px; color: #aaa; }
+    #home-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 14px; }
+    #home-actions button, .local-list-actions button { min-height: 40px; padding: 8px 14px; border-radius: 20px; }
+    #last-updated, .local-only-note { color: #aaa; }
+    .local-list-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 16px; }
     #categories { display: flex; gap: 10px; overflow-x: auto; padding: 2px 0 18px; }
     #categories button { flex: 0 0 auto; padding: 9px 14px; border-radius: 8px; }
     #categories button.active { color: #111; background: #f1f1f1; }
@@ -966,7 +970,8 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       input { min-height: 44px; }
       .layout { grid-template-columns: minmax(0, 1fr); }
       nav { position: sticky; top: 120px; z-index: 3; display: flex; height: auto; padding: 8px 12px; background: #0f0f0f; border-right: 0; border-bottom: 1px solid #282828; }
-      nav button { width: auto; min-height: 44px; flex: 1; margin: 0; text-align: center; }
+      nav { overflow-x: auto; }
+      nav button { width: auto; min-width: max-content; min-height: 44px; flex: 1 0 auto; margin: 0; text-align: center; }
       main { padding: 18px 14px 36px; }
       h1 { margin-bottom: 14px; font-size: 20px; }
       #categories { gap: 8px; margin: 0 -14px; padding: 2px 14px 16px; scrollbar-width: thin; }
@@ -1005,6 +1010,8 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     <nav aria-label="主要導覽">
       <button type="button" data-view="popular">首頁 / 熱門</button>
       <button type="button" data-view="search">搜尋結果</button>
+      <button type="button" data-view="recent">最近看過</button>
+      <button type="button" data-view="favorites">我的收藏</button>
       <button type="button" data-view="playlists">我的清單</button>
     </nav>
     <main>
@@ -1015,8 +1022,14 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         <div id="player"></div>
       </section>
       <h1 id="heading">熱門影片</h1>
+      <div id="home-actions">
+        <button id="refresh-popular" type="button">重新整理熱門影片</button>
+        <span id="last-updated" aria-live="polite">尚未更新</span>
+        <span class="local-only-note">只在開啟首頁、切換分類或手動重新整理時載入，不會背景輪詢。</span>
+      </div>
       <div id="categories" aria-label="影片分類"></div>
       <p id="status" role="status"></p>
+      <div id="local-list-actions" class="local-list-actions" hidden></div>
       <section id="videos" aria-live="polite"></section>
       <footer>
         YouTube 影片與播放清單屬於各自權利人；本服務透過 YouTube API 和官方播放器提供功能，並非 YouTube 官方產品。
@@ -1031,6 +1044,10 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     const status = document.getElementById('status');
     const videos = document.getElementById('videos');
     const categories = document.getElementById('categories');
+    const homeActions = document.getElementById('home-actions');
+    const refreshPopularButton = document.getElementById('refresh-popular');
+    const lastUpdated = document.getElementById('last-updated');
+    const localListActions = document.getElementById('local-list-actions');
     const playerPanel = document.getElementById('player-panel');
     const closePlayer = document.getElementById('close-player');
     const accountButton = document.getElementById('account-button');
@@ -1040,6 +1057,87 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     let playerTrigger = null;
     let authenticated = false;
     let csrfToken = '';
+    const RECENT_STORAGE_KEY = 'youtube-explorer-recent-v1';
+    const FAVORITES_STORAGE_KEY = 'youtube-explorer-favorites-v1';
+    let activePopularUrl = '/api/popular';
+    let activePopularTitle = '熱門影片';
+    let currentLocalView = '';
+
+    function readLocalVideos(key) {
+      try {
+        const value = localStorage.getItem(key);
+        if (value === null) return [];
+        const parsed = JSON.parse(value);
+        if (!Array.isArray(parsed)) throw new Error('本機影片資料格式不正確。');
+        return parsed.filter(item =>
+          item && typeof item.videoId === 'string' &&
+          /^[a-zA-Z0-9_-]{11}$/.test(item.videoId) &&
+          typeof item.title === 'string' &&
+          typeof item.channelTitle === 'string' &&
+          typeof item.thumbnail === 'string');
+      } catch (error) {
+        status.textContent = error.message || '無法讀取瀏覽器本機資料。';
+        return null;
+      }
+    }
+
+    function writeLocalVideos(key, items) {
+      try {
+        localStorage.setItem(key, JSON.stringify(items));
+        return true;
+      } catch (error) {
+        status.textContent = error.message || '無法儲存到瀏覽器本機，請檢查儲存空間或瀏覽器設定。';
+        return false;
+      }
+    }
+
+    function localVideoRecord(item) {
+      const videoId = typeof item.id === 'string' ? item.id : item.id && item.id.videoId;
+      const snippet = item.snippet;
+      if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId) || !snippet) return null;
+      const thumbnails = snippet.thumbnails || {};
+      const thumbnail = (thumbnails.medium && thumbnails.medium.url) ||
+        (thumbnails.high && thumbnails.high.url) ||
+        (thumbnails.default && thumbnails.default.url) || '';
+      return {
+        videoId,
+        title: typeof snippet.title === 'string' ? snippet.title : '未命名影片',
+        channelTitle: typeof snippet.channelTitle === 'string' ? snippet.channelTitle : '',
+        thumbnail: typeof thumbnail === 'string' && /^https:\/\/.+/i.test(thumbnail) ? thumbnail : ''
+      };
+    }
+
+    function toVideoItem(record) {
+      return {
+        id: record.videoId,
+        snippet: {
+          title: record.title,
+          channelTitle: record.channelTitle,
+          thumbnails: { default: { url: record.thumbnail } }
+        }
+      };
+    }
+
+    function addRecentVideo(item) {
+      const record = localVideoRecord(item);
+      if (!record) return;
+      const recent = readLocalVideos(RECENT_STORAGE_KEY);
+      if (!recent) return;
+      const updated = [record, ...recent.filter(entry => entry.videoId !== record.videoId)].slice(0, 30);
+      writeLocalVideos(RECENT_STORAGE_KEY, updated);
+    }
+
+    function toggleFavorite(item) {
+      const record = localVideoRecord(item);
+      if (!record) return false;
+      const favorites = readLocalVideos(FAVORITES_STORAGE_KEY);
+      if (!favorites) return false;
+      const exists = favorites.some(entry => entry.videoId === record.videoId);
+      const updated = exists
+        ? favorites.filter(entry => entry.videoId !== record.videoId)
+        : [record, ...favorites].slice(0, 100);
+      return writeLocalVideos(FAVORITES_STORAGE_KEY, updated);
+    }
 
     function closeVideoPlayer() {
       pendingVideoId = null;
@@ -1084,8 +1182,9 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       });
     };
 
-    function playVideo(videoId, trigger) {
+    function playVideo(videoId, trigger, item) {
       if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) return;
+      if (item) addRecentVideo(item);
       playerTrigger = trigger;
       playerPanel.hidden = false;
       document.body.classList.add('player-open');
@@ -1096,6 +1195,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
 
     function displayVideos(items) {
       videos.replaceChildren();
+      const savedFavorites = readLocalVideos(FAVORITES_STORAGE_KEY);
       for (const item of items || []) {
         const videoId = typeof item.id === 'string' ? item.id : item.id && item.id.videoId;
         const snippet = item.snippet;
@@ -1107,7 +1207,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         thumbnailButton.type = 'button';
         thumbnailButton.className = 'thumbnail-button';
         thumbnailButton.setAttribute('aria-label', '播放影片：' + (snippet.title || '未命名影片'));
-        thumbnailButton.addEventListener('click', event => playVideo(videoId, event.currentTarget));
+        thumbnailButton.addEventListener('click', event => playVideo(videoId, event.currentTarget, item));
         const thumbnail = document.createElement('img');
         const thumbnails = snippet.thumbnails || {};
         thumbnail.src = (thumbnails.medium && thumbnails.medium.url) ||
@@ -1143,9 +1243,23 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         const playButton = document.createElement('button');
         playButton.type = 'button';
         playButton.textContent = '播放';
-        playButton.addEventListener('click', event => playVideo(videoId, event.currentTarget));
+        playButton.addEventListener('click', event => playVideo(videoId, event.currentTarget, item));
 
         card.append(thumbnailButton, title, channel, description, descriptionToggle, playButton);
+        const favoriteButton = document.createElement('button');
+        favoriteButton.type = 'button';
+        favoriteButton.className = 'favorite-button';
+        const isFavorite = savedFavorites && savedFavorites.some(entry => entry.videoId === videoId);
+        favoriteButton.textContent = isFavorite ? '移除收藏' : '加入收藏';
+        favoriteButton.setAttribute('aria-pressed', String(Boolean(isFavorite)));
+        favoriteButton.addEventListener('click', () => {
+          if (!toggleFavorite(item)) return;
+          const nowFavorite = favoriteButton.getAttribute('aria-pressed') !== 'true';
+          favoriteButton.setAttribute('aria-pressed', String(nowFavorite));
+          favoriteButton.textContent = nowFavorite ? '移除收藏' : '加入收藏';
+          if (currentLocalView === 'favorites' && !nowFavorite) showLocalVideoList('favorites');
+        });
+        card.append(favoriteButton);
         const addButton = document.createElement('button');
         addButton.type = 'button';
         addButton.className = 'add-playlist-button';
@@ -1209,6 +1323,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         descriptionToggle.disabled = !hasLongDescription;
         descriptionToggle.setAttribute('aria-hidden', String(!hasLongDescription));
       }
+      if (!savedFavorites) return;
       if (!videos.children.length) status.textContent = '找不到符合的影片。';
       else status.textContent = '';
     }
@@ -1228,6 +1343,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     function makeButton(label, action) {
       const button = document.createElement('button');
       button.type = 'button';
+      button.dataset.categoryFilter = item.id;
       button.textContent = label;
       button.addEventListener('click', action);
       return button;
@@ -1307,7 +1423,11 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
 
     async function loadMyPlaylists(pageToken = '') {
       heading.textContent = '我的 YouTube 播放清單';
+      currentLocalView = '';
+      homeActions.hidden = true;
+      localListActions.hidden = true;
       categories.replaceChildren();
+      categories.hidden = true;
       videos.replaceChildren();
       status.textContent = '';
       closeVideoPlayer();
@@ -1394,6 +1514,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         makeButton('返回我的清單', () => loadMyPlaylists()),
         ...(pageToken ? [makeButton('回到影片第一頁', () => loadPlaylistItems(playlistId, playlistTitle))] : [])
       );
+      categories.hidden = false;
       videos.replaceChildren();
       status.textContent = '載入播放清單…';
       const addForm = document.createElement('form');
@@ -1438,7 +1559,13 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
           const actions = document.createElement('div');
           actions.className = 'playlist-actions';
           actions.append(
-            makeButton('播放', event => playVideo(videoId, event.currentTarget)),
+            makeButton('播放', event => playVideo(videoId, event.currentTarget, {
+              id: videoId,
+              snippet: {
+                title: item.snippet.title,
+                channelTitle: item.snippet.videoOwnerChannelTitle || ''
+              }
+            })),
             makeButton('從清單移除', async () => {
               if (!window.confirm('確定從播放清單移除此影片？')) return;
               try {
@@ -1466,8 +1593,14 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
 
     async function loadVideoList(url, title) {
       heading.textContent = title;
+      currentLocalView = '';
+      homeActions.hidden = !url.startsWith('/api/popular');
+      localListActions.hidden = true;
+      categories.hidden = !url.startsWith('/api/popular');
       status.textContent = '載入中…';
       videos.replaceChildren();
+      const isPopularRequest = url.startsWith('/api/popular');
+      if (isPopularRequest) refreshPopularButton.disabled = true;
       try {
         const response = await fetch(url);
         const data = await response.json();
@@ -1485,12 +1618,61 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
           }));
         }
         displayVideos(items);
+        if (isPopularRequest) {
+          lastUpdated.textContent = '本頁取得時間：' + new Intl.DateTimeFormat('zh-TW', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+          }).format(new Date());
+        }
       } catch (error) {
         status.textContent = error.message || '無法載入影片，請稍後再試。';
+      } finally {
+        if (isPopularRequest) refreshPopularButton.disabled = false;
+      }
+    }
+
+    function showLocalVideoList(type) {
+      const isRecent = type === 'recent';
+      currentLocalView = type;
+      homeActions.hidden = true;
+      categories.replaceChildren();
+      categories.hidden = true;
+      localListActions.replaceChildren();
+      localListActions.hidden = false;
+      heading.textContent = isRecent ? '最近看過' : '我的收藏';
+      status.textContent = '';
+      videos.replaceChildren();
+      closeVideoPlayer();
+
+      const note = document.createElement('span');
+      note.className = 'local-only-note';
+      note.textContent = '資料只保存在這個瀏覽器，不會同步到其他裝置。';
+      localListActions.append(note);
+
+      const storageKey = isRecent ? RECENT_STORAGE_KEY : FAVORITES_STORAGE_KEY;
+      const items = readLocalVideos(storageKey);
+      if (!items) return;
+      const clearButton = document.createElement('button');
+      clearButton.type = 'button';
+      clearButton.textContent = isRecent ? '清除最近看過' : '清除全部收藏';
+      clearButton.addEventListener('click', () => {
+        if (!window.confirm(isRecent ? '確定清除最近看過的影片？' : '確定清除所有收藏？')) return;
+        if (!writeLocalVideos(storageKey, [])) return;
+        showLocalVideoList(type);
+        status.textContent = isRecent ? '已清除最近看過的影片。' : '已清除所有收藏。';
+      });
+      localListActions.append(clearButton);
+      if (items.length) {
+        displayVideos(items.map(toVideoItem));
+      } else {
+        status.textContent = isRecent ? '尚無最近看過的影片。播放影片後會顯示在這裡。' : '尚無收藏影片。';
       }
     }
 
     async function loadCategories() {
+      categories.replaceChildren();
+      categories.hidden = false;
       try {
         const response = await fetch('/api/categories');
         const data = await response.json();
@@ -1500,10 +1682,13 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         allButton.type = 'button';
         allButton.textContent = '全部';
         allButton.className = 'active';
+        allButton.dataset.categoryFilter = 'all';
         allButton.addEventListener('click', () => {
           categories.querySelectorAll('button').forEach(button => button.classList.remove('active'));
           allButton.classList.add('active');
-          loadVideoList('/api/popular', '熱門影片');
+          activePopularUrl = '/api/popular';
+          activePopularTitle = '熱門影片';
+          loadVideoList(activePopularUrl, activePopularTitle);
         });
         categories.append(allButton);
 
@@ -1515,7 +1700,9 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
           button.addEventListener('click', () => {
             categories.querySelectorAll('button').forEach(category => category.classList.remove('active'));
             button.classList.add('active');
-            loadVideoList('/api/popular?categoryId=' + encodeURIComponent(item.id), button.textContent);
+            activePopularUrl = '/api/popular?categoryId=' + encodeURIComponent(item.id);
+            activePopularTitle = button.textContent;
+            loadVideoList(activePopularUrl, activePopularTitle);
           });
           categories.append(button);
         }
@@ -1529,22 +1716,32 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       const query = queryInput.value.trim();
       if (!query) return;
       closeVideoPlayer();
-      categories.replaceChildren();
+      categories.hidden = true;
       await loadVideoList('/api/search?q=' + encodeURIComponent(query), '搜尋結果');
     });
 
     document.querySelector('[data-view="popular"]').addEventListener('click', () => {
       closeVideoPlayer();
+      categories.hidden = false;
+      if (!categories.querySelector('[data-category-filter]')) loadCategories();
       categories.querySelectorAll('button').forEach(button => button.classList.remove('active'));
       const allButton = categories.querySelector('button');
       if (allButton) allButton.classList.add('active');
-      loadVideoList('/api/popular', '熱門影片');
+      activePopularUrl = '/api/popular';
+      activePopularTitle = '熱門影片';
+      loadVideoList(activePopularUrl, activePopularTitle);
+    });
+
+    refreshPopularButton.addEventListener('click', () => {
+      loadVideoList(activePopularUrl, activePopularTitle);
     });
 
     document.querySelector('[data-view="search"]').addEventListener('click', () => {
       queryInput.focus();
     });
 
+    document.querySelector('[data-view="recent"]').addEventListener('click', () => showLocalVideoList('recent'));
+    document.querySelector('[data-view="favorites"]').addEventListener('click', () => showLocalVideoList('favorites'));
     document.querySelector('[data-view="playlists"]').addEventListener('click', () => loadMyPlaylists());
     accountButton.addEventListener('click', async () => {
       if (!authenticated) {
@@ -1578,12 +1775,13 @@ const char* PRIVACY_PAGE = R"html(<!doctype html>
 <html lang="zh-Hant"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>隱私權政策｜YouTube 影片探索</title>
 <style>body{max-width:760px;margin:0 auto;padding:24px;color:#f1f1f1;background:#0f0f0f;font:16px/1.7 Arial,sans-serif}a{color:#9cf}h1,h2{line-height:1.3}li{margin:8px 0}</style></head>
-<body><p><a href="/">返回首頁</a></p><h1>隱私權政策</h1><p>更新日期：2026 年 10 月 23 日</p>
+<body><p><a href="/">返回首頁</a></p><h1>隱私權政策</h1><p>更新日期：2026 年 10 月 25 日</p>
 <p>本服務提供 YouTube 影片搜尋、播放及 YouTube 播放清單管理功能。使用 Google 登入是自願的；不登入仍可使用公開影片探索功能。</p>
 <h2>我們存取及保存的資料</h2><ul>
 <li>Google 帳戶識別碼及電子郵件，用於識別登入帳戶。</li>
 <li>你授權的 OAuth refresh token，以 AES-256-GCM 加密後保存於 Render Postgres；短效 access token 僅在伺服器記憶體中用於 API 請求。</li>
 <li>登入 session 與 CSRF 防護資料；session 最長 30 天。</li>
+<li>最近看過的影片（最多 30 部）及收藏影片（最多 100 部）會保存在目前瀏覽器的本機儲存空間，不會同步到本站伺服器或其他裝置。你可以在「最近看過」或「我的收藏」清除；清除瀏覽器網站資料也會移除這些紀錄。</li>
 <li>播放清單和影片資料由 YouTube 提供，供本服務即時顯示與操作；本服務不以自有資料庫作為播放清單的主要儲存位置。</li></ul>
 <h2>資料使用與第三方服務</h2><p>資料只用於登入、維持授權，以及依照你的操作透過 YouTube Data API 讀取或管理你的播放清單。Google 會依其政策處理 API 請求；Render 提供本服務主機及資料庫。本站不會索取或保存你的 Google 密碼，也不會出售你的 Google 使用者資料。</p>
 <h2>撤銷與刪除</h2><p>使用「我的清單」中的「解除 Google 授權」，本服務會向 Google 撤銷授權，並刪除本站保存的帳戶 token 與登入 session。你也可以在 Google 帳戶的第三方連結設定中撤銷授權；撤銷後，可能需要回到本站清除已保存的連結資料。播放清單的建立或刪除會直接影響你的 YouTube 帳戶。</p>
