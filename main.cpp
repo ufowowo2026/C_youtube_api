@@ -1343,7 +1343,6 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     function makeButton(label, action) {
       const button = document.createElement('button');
       button.type = 'button';
-      button.dataset.categoryFilter = item.id;
       button.textContent = label;
       button.addEventListener('click', action);
       return button;
@@ -1696,6 +1695,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
           if (!item.id || !item.snippet || item.snippet.assignable === false) continue;
           const button = document.createElement('button');
           button.type = 'button';
+          button.dataset.categoryFilter = item.id;
           button.textContent = item.snippet.title || '影片分類';
           button.addEventListener('click', () => {
             categories.querySelectorAll('button').forEach(category => category.classList.remove('active'));
