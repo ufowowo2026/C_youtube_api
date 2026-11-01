@@ -204,7 +204,12 @@ bool ensure_auth_schema(PGconn* connection) {
         "google_sub TEXT NOT NULL REFERENCES google_accounts(google_sub) ON DELETE CASCADE, "
         "station_id TEXT NOT NULL, name TEXT NOT NULL, url TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, "
         "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (google_sub, station_id))",
-        "CREATE INDEX IF NOT EXISTS radio_stations_account_idx ON radio_stations(google_sub, position)"
+        "CREATE INDEX IF NOT EXISTS radio_stations_account_idx ON radio_stations(google_sub, position)",
+        "CREATE TABLE IF NOT EXISTS camera_views ("
+        "google_sub TEXT NOT NULL REFERENCES google_accounts(google_sub) ON DELETE CASCADE, "
+        "camera_id TEXT NOT NULL, name TEXT NOT NULL, image_url TEXT NOT NULL, latitude DOUBLE PRECISION, longitude DOUBLE PRECISION, position INTEGER NOT NULL DEFAULT 0, "
+        "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (google_sub, camera_id))",
+        "CREATE INDEX IF NOT EXISTS camera_views_account_idx ON camera_views(google_sub, position)"
     };
 
     for (const char* statement : statements) {
@@ -989,6 +994,18 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     .radio-play-button { min-width: 112px; min-height: 48px; padding: 12px 20px !important; border-radius: 24px !important; color: #fff !important; background: #e53935 !important; font-size: 16px; font-weight: 700; box-shadow: 0 4px 14px rgba(229, 57, 53, .35); }
     .radio-play-button:hover { background: #ff5252 !important; transform: translateY(-1px); }
     .radio-play-button:active { transform: translateY(0); }
+    #camera-panel { margin-bottom: 20px; }
+    .camera-toolbar { display: flex; gap: 10px; margin-bottom: 12px; }
+    .camera-toolbar input { flex: 1; border-radius: 20px; }
+    #camera-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+    .camera-card { overflow: hidden; border: 1px solid #303030; border-radius: 12px; background: #181818; }
+    .camera-card img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: #111; }
+    .camera-card-content { padding: 12px; }
+    .camera-card h3 { margin: 0 0 10px; font-size: 16px; }
+    .camera-card-actions { display: flex; gap: 8px; }
+    .camera-add-button { flex: 1; min-height: 44px; border-radius: 22px !important; background: #1976d2 !important; font-weight: 700; }
+    .camera-note { color: #aaa; }
+    @media (max-width: 700px) { .camera-toolbar { flex-direction: column; } }
     @media (max-width: 700px) {
       .radio-form { grid-template-columns: 1fr; }
       .radio-station { grid-template-columns: 1fr; padding: 16px; }
@@ -1090,6 +1107,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       <button type="button" data-view="favorites">我的收藏</button>
       <button type="button" data-view="playlists">我的清單</button>
       <button type="button" data-view="radio">線上廣播</button>
+      <button type="button" data-view="cameras">即時影像</button>
     </nav>
     <main>
       <section id="player-panel" role="dialog" aria-modal="true" aria-label="影片播放器" hidden>
@@ -1107,6 +1125,14 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
           <input id="radio-url" type="url" maxlength="2048" placeholder="授權串流網址或電台介紹頁 .html" aria-label="授權串流網址或電台介紹頁" required>
           <button type="submit">新增廣播</button>
         </form>
+      </section>
+      <section id="camera-panel" aria-label="即時影像" hidden>
+        <div class="camera-toolbar">
+          <input id="camera-search" type="search" maxlength="100" placeholder="搜尋地點或攝影機名稱" aria-label="搜尋攝影機">
+          <button id="camera-refresh" type="button">重新載入攝影機清單</button>
+        </div>
+        <p class="camera-note">影像資料來源：TWIPCAM。加入清單後可刷新快照；登入 Google 帳號可跨裝置同步。</p>
+        <div id="camera-grid"></div>
       </section>
       <div id="home-actions">
         <button id="refresh-popular" type="button">重新整理熱門影片</button>
@@ -1139,6 +1165,10 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     const radioForm = document.getElementById('radio-form');
     const radioName = document.getElementById('radio-name');
     const radioUrl = document.getElementById('radio-url');
+    const cameraPanel = document.getElementById('camera-panel');
+    const cameraGrid = document.getElementById('camera-grid');
+    const cameraSearch = document.getElementById('camera-search');
+    const cameraRefresh = document.getElementById('camera-refresh');
     const playerPanel = document.getElementById('player-panel');
     const closePlayer = document.getElementById('close-player');
     const accountButton = document.getElementById('account-button');
@@ -1151,6 +1181,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     const RECENT_STORAGE_KEY = 'youtube-explorer-recent-v1';
     const FAVORITES_STORAGE_KEY = 'youtube-explorer-favorites-v1';
     const RADIO_STORAGE_KEY = 'youtube-explorer-radio-v1';
+    const CAMERA_STORAGE_KEY = 'youtube-explorer-cameras-v1';
     const DEFAULT_RADIO_STATIONS = [{
       id: 'classic-fm-977',
       name: '古典音樂台 FM 97.7',
@@ -1186,6 +1217,86 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         status.textContent = error.message || '無法儲存到瀏覽器本機，請檢查儲存空間或瀏覽器設定。';
         return false;
       }
+    }
+
+    function readSavedCameras() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(CAMERA_STORAGE_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed.filter(camera => camera && typeof camera.id === 'string' && typeof camera.name === 'string' && typeof camera.imageUrl === 'string') : [];
+      } catch (error) { return []; }
+    }
+
+    function writeSavedCameras(cameras) {
+      try { localStorage.setItem(CAMERA_STORAGE_KEY, JSON.stringify(cameras)); return true; }
+      catch (error) { status.textContent = '無法儲存即時影像清單。'; return false; }
+    }
+
+    async function loadAccountCameras() {
+      const response = await fetch('/api/cameras/views');
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '無法載入帳號即時影像清單。');
+      return Array.isArray(data.cameras) ? data.cameras : [];
+    }
+
+    async function saveAccountCamera(camera, remove = false) {
+      const headers = new Headers({ 'Content-Type': 'application/json' });
+      if (csrfToken) headers.set('X-CSRF-Token', csrfToken);
+      const payload = { ...camera, imageUrl: camera.sourceUrl || camera.imageUrl, lat: String(camera.lat ?? 0), lon: String(camera.lon ?? 0) };
+      const response = await fetch('/api/cameras/views', { method: remove ? 'DELETE' : 'POST', headers, body: JSON.stringify(payload) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) { status.textContent = data.error || '無法更新帳號即時影像清單。'; return false; }
+      return true;
+    }
+
+    let cameraCatalog = [];
+    async function loadCameraCatalog() {
+      status.textContent = '載入即時影像攝影機清單…';
+      try {
+        const response = await fetch('/api/cameras/catalog');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '無法載入即時影像攝影機清單。');
+        cameraCatalog = Array.isArray(data.cameras) ? data.cameras : [];
+        status.textContent = '';
+        renderCameras();
+      } catch (error) { status.textContent = error.message || '無法載入即時影像攝影機清單。'; }
+    }
+
+    async function renderCameras() {
+      cameraGrid.replaceChildren();
+      const saved = authenticated ? await loadAccountCameras() : readSavedCameras();
+      const savedIds = new Set(saved.map(camera => camera.id));
+      const query = cameraSearch.value.trim().toLowerCase();
+      const cameras = cameraCatalog.filter(camera => !query || camera.name.toLowerCase().includes(query));
+      if (!cameras.length) {
+        const empty = document.createElement('p'); empty.textContent = '找不到符合條件的攝影機。'; cameraGrid.append(empty); return;
+      }
+      for (const camera of cameras) {
+        const card = document.createElement('article'); card.className = 'camera-card';
+        const image = document.createElement('img'); image.src = camera.imageUrl; image.alt = camera.name; image.loading = 'lazy';
+        image.addEventListener('error', () => { image.alt = `${camera.name}（目前無法載入快照）`; });
+        const content = document.createElement('div'); content.className = 'camera-card-content';
+        const title = document.createElement('h3'); title.textContent = camera.name;
+        const actions = document.createElement('div'); actions.className = 'camera-card-actions';
+        const isSaved = savedIds.has(camera.id);
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'camera-add-button';
+        button.textContent = isSaved ? '移除清單' : '加入清單';
+        button.addEventListener('click', async () => {
+          if (authenticated) {
+            if (!(await saveAccountCamera(camera, isSaved))) return;
+          } else {
+            const local = readSavedCameras();
+            writeSavedCameras(isSaved ? local.filter(item => item.id !== camera.id) : [camera, ...local]);
+          }
+          await renderCameras();
+        });
+        actions.append(button); content.append(title, actions); card.append(image, content); cameraGrid.append(card);
+      }
+    }
+
+    async function showCameraView() {
+      heading.textContent = '即時影像'; homeActions.hidden = true; categories.hidden = true; localListActions.hidden = true;
+      playerPanel.hidden = true; radioPanel.hidden = true; cameraPanel.hidden = false; status.textContent = '';
+      await updateAccountStatus(); await loadCameraCatalog();
     }
 
     function readRadioStations() {
@@ -1310,6 +1421,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       localListActions.hidden = true;
       playerPanel.hidden = true;
       radioPanel.hidden = false;
+      cameraPanel.hidden = true;
       status.textContent = authenticated ? '載入帳號廣播清單…' : '';
       if (!authenticated) {
         renderRadioStations();
@@ -1598,7 +1710,12 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
                 await saveAccountRadioStation(station);
               }
             }
+            const accountCameras = await loadAccountCameras();
+            for (const camera of readSavedCameras()) {
+              if (!accountCameras.some(item => item.id === camera.id || item.imageUrl === camera.imageUrl)) await saveAccountCamera(camera);
+            }
             if (!radioPanel.hidden) renderRadioStations(await loadAccountRadioStations());
+            if (!cameraPanel.hidden) await renderCameras();
           } catch (error) {
             status.textContent = error.message || '無法同步瀏覽器廣播清單。';
           }
@@ -1672,6 +1789,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       heading.textContent = '我的 YouTube 播放清單';
       currentLocalView = '';
       radioPanel.hidden = true;
+      cameraPanel.hidden = true;
       homeActions.hidden = true;
       localListActions.hidden = true;
       categories.replaceChildren();
@@ -1843,6 +1961,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       heading.textContent = title;
       currentLocalView = '';
       radioPanel.hidden = true;
+      cameraPanel.hidden = true;
       homeActions.hidden = !url.startsWith('/api/popular');
       localListActions.hidden = true;
       categories.hidden = !url.startsWith('/api/popular');
@@ -1885,6 +2004,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       const isRecent = type === 'recent';
       currentLocalView = type;
       radioPanel.hidden = true;
+      cameraPanel.hidden = true;
       homeActions.hidden = true;
       categories.replaceChildren();
       categories.hidden = true;
@@ -1994,6 +2114,10 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     document.querySelector('[data-view="recent"]').addEventListener('click', () => showLocalVideoList('recent'));
     document.querySelector('[data-view="favorites"]').addEventListener('click', () => showLocalVideoList('favorites'));
     document.querySelector('[data-view="playlists"]').addEventListener('click', () => loadMyPlaylists());
+    document.querySelector('[data-view="cameras"]').addEventListener('click', showCameraView);
+    cameraSearch.addEventListener('input', renderCameras);
+    cameraRefresh.addEventListener('click', loadCameraCatalog);
+
     document.querySelector('[data-view="radio"]').addEventListener('click', async () => {
       await updateAccountStatus();
       await showRadioView();
@@ -2615,6 +2739,119 @@ int main() {
             {"part", "snippet"},
             {"regionCode", "TW"}
         });
+    });
+
+    CROW_ROUTE(app, "/api/cameras/image")([](const crow::request& request) {
+        const char* id_param = request.url_params.get("id");
+        const std::string id = id_param == nullptr ? "" : std::string(id_param);
+        static const std::regex id_pattern("^[a-zA-Z0-9_-]{1,128}$");
+        if (!std::regex_match(id, id_pattern)) return json_error(400, "攝影機 ID 格式不正確。");
+        const auto upstream_list = request_http("https://www.twipcam.com/api/v1/cam-list.json", "GET");
+        if (upstream_list.request_status != CURLE_OK || upstream_list.http_status != 200) return json_error(502, "無法載入攝影機資料。");
+        const auto list = crow::json::load(upstream_list.body);
+        if (!list || list.t() != crow::json::type::List) return json_error(502, "攝影機來源格式不正確。");
+        for (size_t index = 0; index < list.size(); ++index) {
+            const auto camera = list[index];
+            if (!camera || !camera.has("id") || !camera.has("cam_url") || camera["id"].s() != id) continue;
+            const std::string source_url = camera["cam_url"].s();
+            if (!valid_public_http_url(source_url)) return json_error(502, "攝影機影像網址無效。");
+            const auto snapshot = request_http(source_url, "GET");
+            if (snapshot.request_status != CURLE_OK || snapshot.http_status < 200 || snapshot.http_status >= 400)
+                return json_error(502, "無法載入攝影機快照。");
+            crow::response response(snapshot.body); response.set_header("Cache-Control", "no-store");
+            response.set_header("Content-Type", "image/jpeg");
+            return response;
+        }
+        return json_error(404, "找不到指定攝影機。");
+    });
+
+    CROW_ROUTE(app, "/api/cameras/catalog")([] {
+        static constexpr const char* catalog_url = "https://www.twipcam.com/api/v1/cam-list.json";
+        const auto upstream = request_http(catalog_url, "GET");
+        if (upstream.request_status != CURLE_OK || upstream.http_status != 200)
+            return json_error(502, "無法載入即時影像攝影機清單。");
+        const auto list = crow::json::load(upstream.body);
+        if (!list || list.t() != crow::json::type::List) return json_error(502, "即時影像來源格式不正確。");
+        crow::json::wvalue result;
+        result["cameras"] = crow::json::wvalue::list();
+        size_t count = 0;
+        for (size_t index = 0; index < list.size() && count < 300; ++index) {
+            const auto camera = list[index];
+            if (!camera || camera.t() != crow::json::type::Object || !camera.has("id") || !camera.has("name") || !camera.has("cam_url")) continue;
+            const std::string id = camera["id"].s();
+            const std::string name = camera["name"].s();
+            const std::string url = camera["cam_url"].s();
+            if (id.empty() || name.empty() || !valid_public_http_url(url)) continue;
+            crow::json::wvalue item;
+            item["id"] = id;
+            item["name"] = name;
+            item["imageUrl"] = "/api/cameras/image?id=" + id;
+            item["sourceUrl"] = url;
+            item["lat"] = camera.has("lat") ? camera["lat"].d() : 0.0;
+            item["lon"] = camera.has("lon") ? camera["lon"].d() : 0.0;
+            result["cameras"][count++] = std::move(item);
+        }
+        result["cameras"].resize(count);
+        return crow::response(result);
+    });
+
+    CROW_ROUTE(app, "/api/cameras/views").methods(crow::HTTPMethod::GET)([](const crow::request& request) {
+        PgConnection database;
+        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable(database.get());
+        AccountSession session;
+        if (!lookup_session(database.get(), request, session)) return authentication_required();
+        PgResult result = execute_sql(database.get(),
+            "SELECT camera_id,name,image_url,latitude,longitude FROM camera_views WHERE google_sub=$1 ORDER BY position ASC,updated_at DESC",
+            {session.google_sub});
+        if (!result || PQresultStatus(result.get()) != PGRES_TUPLES_OK) return database_unavailable(database.get());
+        crow::json::wvalue body;
+        body["cameras"] = crow::json::wvalue::list();
+        for (int row = 0; row < PQntuples(result.get()); ++row) {
+            crow::json::wvalue camera;
+            camera["id"] = PQgetvalue(result.get(), row, 0);
+            camera["name"] = PQgetvalue(result.get(), row, 1);
+            camera["imageUrl"] = PQgetvalue(result.get(), row, 2);
+            camera["lat"] = PQgetvalue(result.get(), row, 3)[0] ? std::stod(PQgetvalue(result.get(), row, 3)) : 0.0;
+            camera["lon"] = PQgetvalue(result.get(), row, 4)[0] ? std::stod(PQgetvalue(result.get(), row, 4)) : 0.0;
+            body["cameras"][row] = std::move(camera);
+        }
+        return crow::response(body);
+    });
+
+    CROW_ROUTE(app, "/api/cameras/views").methods(crow::HTTPMethod::POST)([](const crow::request& request) {
+        PgConnection database;
+        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable(database.get());
+        AccountSession session;
+        if (!lookup_session(database.get(), request, session)) return authentication_required();
+        if (!validate_csrf(request, session)) return json_error(403, "安全驗證失敗，請重新載入頁面。");
+        crow::json::rvalue input;
+        if (!read_json_body(request, input)) return json_error(400, "影像資訊格式不正確。");
+        const std::string id = json_request_string(input, "id");
+        const std::string name = json_request_string(input, "name");
+        const std::string url = json_request_string(input, "imageUrl");
+        if (id.empty() || id.size() > 128 || name.empty() || name.size() > 200 || !valid_public_http_url(url))
+            return json_error(400, "攝影機名稱、ID 或影像網址格式不正確。");
+        PgResult result = execute_sql(database.get(),
+            "INSERT INTO camera_views(google_sub,camera_id,name,image_url,latitude,longitude,position) "
+            "VALUES($1,$2,$3,$4,NULLIF($5,'')::DOUBLE PRECISION,NULLIF($6,'')::DOUBLE PRECISION,(SELECT COALESCE(MIN(position)-1,0) FROM camera_views WHERE google_sub=$1)) "
+            "ON CONFLICT(google_sub,camera_id) DO UPDATE SET name=EXCLUDED.name,image_url=EXCLUDED.image_url,updated_at=NOW()",
+            {session.google_sub, id, name, url, json_request_string(input, "lat"), json_request_string(input, "lon")});
+        if (!result || PQresultStatus(result.get()) != PGRES_COMMAND_OK) return database_unavailable(database.get());
+        crow::json::wvalue body; body["ok"] = true; return crow::response(body);
+    });
+
+    CROW_ROUTE(app, "/api/cameras/views").methods(crow::HTTPMethod::DELETE)([](const crow::request& request) {
+        PgConnection database;
+        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable(database.get());
+        AccountSession session;
+        if (!lookup_session(database.get(), request, session)) return authentication_required();
+        if (!validate_csrf(request, session)) return json_error(400, "安全驗證失敗，請重新載入頁面。");
+        crow::json::rvalue input;
+        if (!read_json_body(request, input)) return json_error(400, "影像資訊格式不正確。");
+        const std::string id = json_request_string(input, "id");
+        if (id.empty() || id.size() > 128) return json_error(400, "攝影機 ID 格式不正確。");
+        execute_sql(database.get(), "DELETE FROM camera_views WHERE google_sub=$1 AND camera_id=$2", {session.google_sub, id});
+        crow::json::wvalue body; body["ok"] = true; return crow::response(body);
     });
 
     CROW_ROUTE(app, "/api/radio/stations").methods(crow::HTTPMethod::GET)([](const crow::request& request) {
