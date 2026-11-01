@@ -30,6 +30,24 @@ size_t append_response_body(char* data, size_t size, size_t count, void* user_da
     return bytes;
 }
 
+struct CameraSnapshotDownload {
+    std::string body;
+    bool found_complete_jpeg = false;
+};
+
+size_t append_camera_snapshot(char* data, size_t size, size_t count, void* user_data) {
+    const size_t bytes = size * count;
+    auto* download = static_cast<CameraSnapshotDownload*>(user_data);
+    download->body.append(data, bytes);
+
+    const size_t start = download->body.find("\xFF\xD8", 0);
+    if (start != std::string::npos && download->body.find("\xFF\xD9", start + 2) != std::string::npos) {
+        download->found_complete_jpeg = true;
+        return 0;
+    }
+    return bytes;
+}
+
 crow::response json_error(int status, const std::string& message) {
     crow::json::wvalue body;
     body["error"] = message;
@@ -410,6 +428,34 @@ YouTubeResponse request_http(
     }
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
+    return result;
+}
+
+YouTubeResponse request_camera_snapshot(const std::string& url) {
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) return {CURLE_FAILED_INIT, 0, {}};
+
+    CameraSnapshotDownload download;
+    YouTubeResponse result{CURLE_OK, 0, {}};
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_camera_snapshot);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &download);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36");
+    curl_easy_setopt(curl, CURLOPT_REFERER, "https://www.twipcam.com/");
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+
+    result.request_status = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.http_status);
+    curl_easy_cleanup(curl);
+    result.body = std::move(download.body);
+    if (download.found_complete_jpeg) result.request_status = CURLE_OK;
     return result;
 }
 
@@ -1292,14 +1338,22 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       const card = document.createElement('article'); card.className = 'camera-card';
       const image = document.createElement('img');
       const baseImageUrl = camera.imageUrl;
-      image.src = baseImageUrl;
       image.alt = camera.name;
       image.loading = 'lazy';
       if (baseImageUrl.startsWith('/api/cameras/image')) {
-        window.setInterval(() => {
+        const refreshImage = () => {
           const separator = baseImageUrl.includes('?') ? '&' : '?';
-          image.src = baseImageUrl + separator + '_=' + Date.now();
-        }, 5000);
+          image.src = baseImageUrl + separator + '_=' + Date.now() + '-' + Math.random().toString(36).slice(2);
+        };
+        refreshImage();
+        window.setInterval(refreshImage, 3000);
+        let cameraRetryTimer = 0;
+        image.addEventListener('error', () => {
+          window.clearTimeout(cameraRetryTimer);
+          cameraRetryTimer = window.setTimeout(refreshImage, 2500);
+        });
+      } else {
+        image.src = baseImageUrl;
       }
       const content = document.createElement('div'); content.className = 'camera-card-content';
       const title = document.createElement('h3'); title.textContent = camera.name;
@@ -2828,7 +2882,7 @@ int main() {
             if (!camera || !camera.has("id") || !camera.has("cam_url") || camera["id"].s() != id) continue;
             const std::string source_url = camera["cam_url"].s();
             if (!valid_public_http_url(source_url)) return json_error(502, "攝影機影像網址無效。");
-            const auto snapshot = request_http(source_url, "GET");
+            const auto snapshot = request_camera_snapshot(source_url);
             if (snapshot.request_status != CURLE_OK || snapshot.http_status < 200 || snapshot.http_status >= 400)
                 return json_error(502, "無法載入攝影機快照。");
             std::string image_body = snapshot.body;
