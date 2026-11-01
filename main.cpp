@@ -384,6 +384,10 @@ YouTubeResponse request_http(
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (compatible; CYouTubeRadio/1.0)");
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
     if (headers != nullptr) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     if (method == "POST" || method == "PUT" || !body.empty()) {
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
@@ -892,6 +896,56 @@ std::string json_request_string(const crow::json::rvalue& body, const char* key)
     return read_json_string(body, key);
 }
 
+bool valid_public_http_url(const std::string& value) {
+    static const std::regex pattern("^https?://", std::regex::icase);
+    return std::regex_search(value, pattern) && value.size() <= 2048;
+}
+
+std::string decode_html_attribute(const std::string& value) {
+    std::string result = value;
+    for (const auto& pair : std::vector<std::pair<std::string, std::string>>{
+             {"&amp;", "&"}, {"&#38;", "&"}, {"&quot;", "\""}, {"&#34;", "\""}, {"&#x26;", "&"}}) {
+        size_t position;
+        while ((position = result.find(pair.first)) != std::string::npos) {
+            result.replace(position, pair.first.size(), pair.second);
+        }
+    }
+    return result;
+}
+
+std::string resolve_page_relative_url(const std::string& page_url, const std::string& candidate) {
+    if (valid_public_http_url(candidate)) return decode_html_attribute(candidate);
+    if (candidate.empty() || candidate[0] == '#') return {};
+    if (candidate[0] == '/') {
+        const size_t authority_start = page_url.find("://") + 3;
+        const size_t authority_end = page_url.find('/', authority_start);
+        const std::string origin = page_url.substr(0, authority_end == std::string::npos ? page_url.size() : authority_end);
+        return origin + decode_html_attribute(candidate);
+    }
+    const size_t slash = page_url.rfind('/');
+    if (slash == std::string::npos) return {};
+    return decode_html_attribute(page_url.substr(0, slash + 1) + candidate);
+}
+
+std::string resolve_radio_stream_url(const std::string& page_url, const std::string& page_html) {
+    if (!valid_public_http_url(page_url)) return {};
+    static const std::vector<std::regex> patterns = {
+        std::regex("(?:data-stream-url|stream_url|streamUrl|audio_src)\\s*[=:]\\s*[\\\"']([^\\\"']+)[\\\"']", std::regex::icase),
+        std::regex("(?:data-stream-url|stream_url|streamUrl|audio_src)\\s*=\\s*\\\"([^\"]+)\\\"", std::regex::icase),
+        std::regex("(?:src|file)\\s*=\\s*[\\\"']([^\\\"']+\\.(?:mp3|m4a|aac)(?:\\?[^\\\"']*)?)[\\\"']", std::regex::icase)
+    };
+    for (const auto& pattern : patterns) {
+        for (std::sregex_iterator it(page_html.begin(), page_html.end(), pattern), end; it != end; ++it) {
+            const std::string resolved = resolve_page_relative_url(page_url, (*it)[1].str());
+            if (valid_public_http_url(resolved)) return resolved;
+        }
+    }
+    static const std::regex direct_pattern("https?://[^\\s\\\"<>]+\\.(?:mp3|m4a|aac)(?:\\?[^\\s\\\"<>]*)?", std::regex::icase);
+    std::smatch match;
+    if (std::regex_search(page_html, match, direct_pattern)) return decode_html_attribute(match.str());
+    return {};
+}
+
 const char* HOME_PAGE = R"html(<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
@@ -1037,7 +1091,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         <p class="radio-note">請只新增你有權嵌入或公開播放的廣播串流。網址僅儲存在此瀏覽器，不會上傳到伺服器。</p>
         <form id="radio-form" class="radio-form">
           <input id="radio-name" type="text" maxlength="80" placeholder="電台名稱" aria-label="電台名稱" required>
-          <input id="radio-url" type="url" maxlength="2048" placeholder="授權串流網址" aria-label="授權串流網址" required>
+          <input id="radio-url" type="url" maxlength="2048" placeholder="授權串流網址或電台介紹頁 .html" aria-label="授權串流網址或電台介紹頁" required>
           <button type="submit">新增廣播</button>
         </form>
       </section>
@@ -1876,24 +1930,41 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     document.querySelector('[data-view="playlists"]').addEventListener('click', () => loadMyPlaylists());
     document.querySelector('[data-view="radio"]').addEventListener('click', showRadioView);
 
-    radioForm.addEventListener('submit', event => {
+    radioForm.addEventListener('submit', async event => {
       event.preventDefault();
       const name = radioName.value.trim();
       const url = radioUrl.value.trim();
       if (!name || !validRadioUrl(url)) {
-        status.textContent = '請輸入有效的廣播名稱與 http(s) 串流網址。';
+        status.textContent = '請輸入有效的廣播名稱與 http(s) 網址。';
         return;
       }
-      const stations = readRadioStations();
-      if (stations.some(station => station.url === url)) {
-        status.textContent = '此廣播網址已存在。';
-        return;
+      const submitButton = radioForm.querySelector('button[type="submit"]');
+      submitButton.disabled = true;
+      status.textContent = '正在解析廣播串流…';
+      try {
+        const resolvedResponse = await fetch('/api/radio/resolve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+        const resolvedData = await resolvedResponse.json();
+        if (!resolvedResponse.ok) throw new Error(resolvedData.error || '無法解析廣播串流。');
+        const streamUrl = resolvedData.streamUrl;
+        const stations = readRadioStations();
+        if (stations.some(station => station.url === streamUrl)) {
+          status.textContent = '此廣播串流已存在。';
+          return;
+        }
+        const id = window.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+        if (!writeRadioStations([{ id, name, url: streamUrl }, ...stations].slice(0, 100))) return;
+        radioForm.reset();
+        status.textContent = resolvedData.resolved ? '已找到並新增廣播串流。' : '已新增廣播串流。';
+        renderRadioStations();
+      } catch (error) {
+        status.textContent = error.message || '無法解析廣播網址。';
+      } finally {
+        submitButton.disabled = false;
       }
-      const id = window.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
-      if (!writeRadioStations([{ id, name, url }, ...stations].slice(0, 100))) return;
-      radioForm.reset();
-      status.textContent = '已新增廣播。';
-      renderRadioStations();
     });
 
     radioPlayer.addEventListener('error', () => {
@@ -2468,6 +2539,30 @@ int main() {
             {"part", "snippet"},
             {"regionCode", "TW"}
         });
+    });
+
+    CROW_ROUTE(app, "/api/radio/resolve").methods(crow::HTTPMethod::POST)([](const crow::request& request) {
+        crow::json::rvalue input;
+        if (!read_json_body(request, input)) return json_error(400, "廣播資訊格式不正確。");
+        const std::string url = json_request_string(input, "url");
+        if (!valid_public_http_url(url)) return json_error(400, "請輸入有效的 http(s) 網址。");
+        static const std::regex audio_url_pattern("\\.(?:mp3|m4a|aac)(?:\\?[^\s]*)?$", std::regex::icase);
+        if (std::regex_search(url, audio_url_pattern)) {
+            crow::json::wvalue result;
+            result["streamUrl"] = url;
+            result["resolved"] = false;
+            return crow::response(result);
+        }
+        const auto response = request_http(url, "GET");
+        if (response.request_status != CURLE_OK || response.http_status < 200 || response.http_status >= 400) {
+            return json_error(502, "無法讀取廣播介紹頁。");
+        }
+        const std::string stream_url = resolve_radio_stream_url(url, response.body);
+        if (stream_url.empty()) return json_error(404, "此頁面未找到 MP3、M4A 或 AAC 串流網址。");
+        crow::json::wvalue result;
+        result["streamUrl"] = stream_url;
+        result["resolved"] = true;
+        return crow::response(result);
     });
 
     const char* port_env = std::getenv("PORT");
