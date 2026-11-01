@@ -199,7 +199,12 @@ bool ensure_auth_schema(PGconn* connection) {
         "csrf_hash TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)",
         "CREATE INDEX IF NOT EXISTS web_sessions_expiry_idx ON web_sessions(expires_at)",
         "CREATE TABLE IF NOT EXISTS oauth_states ("
-        "state_hash TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL)"
+        "state_hash TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS radio_stations ("
+        "google_sub TEXT NOT NULL REFERENCES google_accounts(google_sub) ON DELETE CASCADE, "
+        "station_id TEXT NOT NULL, name TEXT NOT NULL, url TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, "
+        "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (google_sub, station_id))",
+        "CREATE INDEX IF NOT EXISTS radio_stations_account_idx ON radio_stations(google_sub, position)"
     };
 
     for (const char* statement : statements) {
@@ -1214,9 +1219,33 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       }
     }
 
-    function renderRadioStations() {
+    async function loadAccountRadioStations() {
+      if (!authenticated) return readRadioStations();
+      const response = await fetch('/api/radio/stations');
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '無法載入帳號廣播清單。');
+      return Array.isArray(data.stations) ? data.stations : [];
+    }
+
+    async function saveAccountRadioStation(station, remove = false) {
+      const headers = new Headers({ 'Content-Type': 'application/json' });
+      if (csrfToken) headers.set('X-CSRF-Token', csrfToken);
+      const response = await fetch('/api/radio/stations', {
+        method: remove ? 'DELETE' : 'POST',
+        headers,
+        body: JSON.stringify(station)
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        status.textContent = data.error || '無法更新帳號廣播清單。';
+        return false;
+      }
+      return true;
+    }
+
+    function renderRadioStations(stationsOverride) {
       videos.replaceChildren();
-      const stations = readRadioStations();
+      const stations = Array.isArray(stationsOverride) ? stationsOverride : readRadioStations();
       if (!stations.length) {
         const empty = document.createElement('p');
         empty.textContent = '尚未新增廣播。請先填寫電台名稱與授權串流網址。';
@@ -1243,14 +1272,16 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.textContent = '刪除';
-        remove.addEventListener('click', () => {
-          if (!writeRadioStations(readRadioStations().filter(item => item.id !== station.id))) return;
+        remove.addEventListener('click', async () => {
+          const remaining = readRadioStations().filter(item => item.id !== station.id);
+          if (authenticated && !(await saveAccountRadioStation(station, true))) return;
+          if (!authenticated && !writeRadioStations(remaining)) return;
           if (radioPlayer.dataset.stationId === station.id) {
             radioPlayer.pause();
             radioPlayer.removeAttribute('src');
             radioPlayer.load();
           }
-          renderRadioStations();
+          if (!authenticated) renderRadioStations(); else renderRadioStations(await loadAccountRadioStations());
         });
         actions.append(play, remove);
         row.append(info, actions);
@@ -1272,15 +1303,24 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       });
     }
 
-    function showRadioView() {
+    async function showRadioView() {
       heading.textContent = '線上廣播';
       homeActions.hidden = true;
       categories.hidden = true;
       localListActions.hidden = true;
       playerPanel.hidden = true;
       radioPanel.hidden = false;
-      status.textContent = '';
-      renderRadioStations();
+      status.textContent = authenticated ? '載入帳號廣播清單…' : '';
+      if (!authenticated) {
+        renderRadioStations();
+        return;
+      }
+      try {
+        renderRadioStations(await loadAccountRadioStations());
+        status.textContent = '';
+      } catch (error) {
+        status.textContent = error.message || '無法載入帳號廣播清單。';
+      }
     }
 
     function localVideoRecord(item) {
@@ -1960,16 +2000,22 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         const resolvedData = await resolvedResponse.json();
         if (!resolvedResponse.ok) throw new Error(resolvedData.error || '無法解析廣播串流。');
         const streamUrl = resolvedData.streamUrl;
-        const stations = readRadioStations();
+        const stations = authenticated ? await loadAccountRadioStations() : readRadioStations();
         if (stations.some(station => station.url === streamUrl)) {
           status.textContent = '此廣播串流已存在。';
           return;
         }
         const id = window.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
-        if (!writeRadioStations([{ id, name, url: streamUrl }, ...stations].slice(0, 100))) return;
+        const station = { id, name, url: streamUrl };
+        if (authenticated) {
+          if (!(await saveAccountRadioStation(station))) return;
+          renderRadioStations(await loadAccountRadioStations());
+        } else {
+          if (!writeRadioStations([station, ...stations].slice(0, 100))) return;
+          renderRadioStations();
+        }
         radioForm.reset();
         status.textContent = resolvedData.resolved ? '已找到並新增廣播串流。' : '已新增廣播串流。';
-        renderRadioStations();
       } catch (error) {
         status.textContent = error.message || '無法解析廣播網址。';
       } finally {
@@ -2549,6 +2595,68 @@ int main() {
             {"part", "snippet"},
             {"regionCode", "TW"}
         });
+    });
+
+    CROW_ROUTE(app, "/api/radio/stations").methods(crow::HTTPMethod::GET)([](const crow::request& request) {
+        PgConnection database;
+        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable(database.get());
+        AccountSession session;
+        if (!lookup_session(database.get(), request, session)) return authentication_required();
+        PgResult result = execute_sql(database.get(),
+            "SELECT station_id,name,url FROM radio_stations WHERE google_sub=$1 ORDER BY position ASC, updated_at DESC",
+            {session.google_sub});
+        if (!result || PQresultStatus(result.get()) != PGRES_TUPLES_OK) return database_unavailable(database.get());
+        crow::json::wvalue stations;
+        stations["stations"] = crow::json::wvalue::list();
+        for (int row = 0; row < PQntuples(result.get()); ++row) {
+            crow::json::wvalue station;
+            station["id"] = PQgetvalue(result.get(), row, 0);
+            station["name"] = PQgetvalue(result.get(), row, 1);
+            station["url"] = PQgetvalue(result.get(), row, 2);
+            stations["stations"][row] = std::move(station);
+        }
+        return crow::response(stations);
+    });
+
+    CROW_ROUTE(app, "/api/radio/stations").methods(crow::HTTPMethod::POST)([](const crow::request& request) {
+        PgConnection database;
+        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable(database.get());
+        AccountSession session;
+        if (!lookup_session(database.get(), request, session)) return authentication_required();
+        if (!validate_csrf(request, session)) return json_error(403, "安全驗證失敗，請重新載入頁面。");
+        crow::json::rvalue input;
+        if (!read_json_body(request, input)) return json_error(400, "廣播資訊格式不正確。");
+        const std::string id = json_request_string(input, "id");
+        const std::string name = json_request_string(input, "name");
+        const std::string url = json_request_string(input, "url");
+        if (id.empty() || id.size() > 100 || name.empty() || name.size() > 80 || !valid_public_http_url(url))
+            return json_error(400, "廣播名稱、ID 或網址格式不正確。");
+        PgResult result = execute_sql(database.get(),
+            "INSERT INTO radio_stations(google_sub,station_id,name,url,position) VALUES($1,$2,$3,$4,"
+            "(SELECT COALESCE(MIN(position)-1,0) FROM radio_stations WHERE google_sub=$1)) "
+            "ON CONFLICT(google_sub,station_id) DO UPDATE SET name=EXCLUDED.name,url=EXCLUDED.url,updated_at=NOW()",
+            {session.google_sub, id, name, url});
+        if (!result || PQresultStatus(result.get()) != PGRES_COMMAND_OK) return database_unavailable(database.get());
+        crow::json::wvalue body;
+        body["ok"] = true;
+        return crow::response(body);
+    });
+
+    CROW_ROUTE(app, "/api/radio/stations").methods(crow::HTTPMethod::DELETE)([](const crow::request& request) {
+        PgConnection database;
+        if (!database.connected() || !ensure_auth_schema(database.get())) return database_unavailable(database.get());
+        AccountSession session;
+        if (!lookup_session(database.get(), request, session)) return authentication_required();
+        if (!validate_csrf(request, session)) return json_error(403, "安全驗證失敗，請重新載入頁面。");
+        crow::json::rvalue input;
+        if (!read_json_body(request, input)) return json_error(400, "廣播資訊格式不正確。");
+        const std::string id = json_request_string(input, "id");
+        if (id.empty() || id.size() > 100) return json_error(400, "廣播 ID 格式不正確。");
+        execute_sql(database.get(), "DELETE FROM radio_stations WHERE google_sub=$1 AND station_id=$2",
+            {session.google_sub, id});
+        crow::json::wvalue body;
+        body["ok"] = true;
+        return crow::response(body);
     });
 
     CROW_ROUTE(app, "/api/radio/resolve").methods(crow::HTTPMethod::POST)([](const crow::request& request) {
