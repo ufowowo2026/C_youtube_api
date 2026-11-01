@@ -1821,6 +1821,13 @@ int main() {
         return response;
     });
 
+    CROW_ROUTE(app, "/health").methods(crow::HTTPMethod::GET)([] {
+        crow::response response(200, R"({"status":"ok"})");
+        response.set_header("Content-Type", "application/json; charset=utf-8");
+        response.set_header("Cache-Control", "no-store");
+        return response;
+    });
+
     CROW_ROUTE(app, "/privacy")([] {
         crow::response response(PRIVACY_PAGE);
         response.set_header("Content-Type", "text/html; charset=utf-8");

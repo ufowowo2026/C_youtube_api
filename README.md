@@ -73,3 +73,17 @@ cmake --build build --config Release
 ```
 
 Docker 部署會使用專案中的 `Dockerfile`。
+
+## Keep-alive 健康檢查
+
+服務提供不需登入、不需外部 API 的健康檢查端點：
+
+```text
+GET /health
+```
+
+正常回應為 HTTP 200 與 `{"status":"ok"}`。可在 UptimeRobot、Uptime Kuma 等服務設定每 5 分鐘請求一次：
+
+```text
+https://c-youtube-api.onrender.com/health
+```
