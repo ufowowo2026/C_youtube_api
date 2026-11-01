@@ -1003,6 +1003,10 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     .camera-card-content { padding: 12px; }
     .camera-card h3 { margin: 0 0 10px; font-size: 16px; }
     .camera-card-actions { display: flex; gap: 8px; }
+    #camera-selection-actions { display: flex; gap: 10px; margin-bottom: 14px; }
+    #camera-selection-actions[hidden] { display: none; }
+    .camera-card-actions label { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 12px; border-radius: 22px; background: #303030; cursor: pointer; }
+    .camera-card-actions input[type="checkbox"] { width: 20px; height: 20px; accent-color: #1976d2; }
     .camera-add-button { flex: 1; min-height: 44px; border-radius: 22px !important; background: #1976d2 !important; font-weight: 700; }
     .camera-note { color: #aaa; }
     @media (max-width: 700px) { .camera-toolbar { flex-direction: column; } }
@@ -1129,9 +1133,13 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       <section id="camera-panel" aria-label="即時影像" hidden>
         <div class="camera-toolbar">
           <input id="camera-search" type="search" maxlength="100" placeholder="搜尋地點或攝影機名稱" aria-label="搜尋攝影機">
-          <button id="camera-refresh" type="button">重新載入攝影機清單</button>
+          <button id="camera-refresh" type="button">搜尋攝影機</button>
         </div>
-        <p class="camera-note">影像資料來源：TWIPCAM。加入清單後可刷新快照；登入 Google 帳號可跨裝置同步。</p>
+        <p class="camera-note">影像資料來源：TWIPCAM。先勾選搜尋結果，再加入播放清單；登入 Google 帳號可跨裝置同步。</p>
+        <div id="camera-selection-actions" hidden>
+          <button id="camera-add-selected" type="button" class="camera-add-button">加入勾選的攝影機</button>
+          <button id="camera-clear-selection" type="button">清除勾選</button>
+        </div>
         <div id="camera-grid"></div>
       </section>
       <div id="home-actions">
@@ -1169,6 +1177,9 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     const cameraGrid = document.getElementById('camera-grid');
     const cameraSearch = document.getElementById('camera-search');
     const cameraRefresh = document.getElementById('camera-refresh');
+    const cameraSelectionActions = document.getElementById('camera-selection-actions');
+    const cameraAddSelected = document.getElementById('camera-add-selected');
+    const cameraClearSelection = document.getElementById('camera-clear-selection');
     const playerPanel = document.getElementById('player-panel');
     const closePlayer = document.getElementById('close-player');
     const accountButton = document.getElementById('account-button');
@@ -1249,54 +1260,76 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     }
 
     let cameraCatalog = [];
+    const selectedCameraIds = new Set();
     async function loadCameraCatalog() {
+      const query = cameraSearch.value.trim();
+      if (!query) {
+        status.textContent = '請輸入地點或攝影機名稱，再搜尋。';
+        return;
+      }
       status.textContent = '載入即時影像攝影機清單…';
       try {
-        const response = await fetch('/api/cameras/catalog');
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || '無法載入即時影像攝影機清單。');
-        cameraCatalog = Array.isArray(data.cameras) ? data.cameras : [];
+        if (!cameraCatalog.length) {
+          const response = await fetch('/api/cameras/catalog');
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || '無法載入即時影像攝影機清單。');
+          cameraCatalog = Array.isArray(data.cameras) ? data.cameras : [];
+        }
         status.textContent = '';
-        renderCameras();
+        await renderCameras();
       } catch (error) { status.textContent = error.message || '無法載入即時影像攝影機清單。'; }
+    }
+
+    function makeCameraCard(camera, saved, selectable = false) {
+      const card = document.createElement('article'); card.className = 'camera-card';
+      const image = document.createElement('img'); image.src = camera.imageUrl; image.alt = camera.name; image.loading = 'lazy';
+      const content = document.createElement('div'); content.className = 'camera-card-content';
+      const title = document.createElement('h3'); title.textContent = camera.name;
+      const actions = document.createElement('div'); actions.className = 'camera-card-actions';
+      if (selectable) {
+        const label = document.createElement('label');
+        const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = selectedCameraIds.has(camera.id);
+        checkbox.addEventListener('change', () => {
+          if (checkbox.checked) selectedCameraIds.add(camera.id); else selectedCameraIds.delete(camera.id);
+          cameraSelectionActions.hidden = selectedCameraIds.size === 0;
+        });
+        label.append(checkbox, document.createTextNode(' 加入播放清單'));
+        actions.append(label);
+      } else {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'camera-add-button';
+        button.textContent = '移除清單'; button.addEventListener('click', async () => {
+          if (authenticated) {
+            if (!(await saveAccountCamera(camera, true))) return;
+          } else writeSavedCameras(readSavedCameras().filter(item => item.id !== camera.id));
+          await renderCameras();
+        });
+        actions.append(button);
+      }
+      content.append(title, actions); card.append(image, content); return card;
     }
 
     async function renderCameras() {
       cameraGrid.replaceChildren();
       const saved = authenticated ? await loadAccountCameras() : readSavedCameras();
       const savedIds = new Set(saved.map(camera => camera.id));
+      for (const camera of saved) cameraGrid.append(makeCameraCard(camera, true));
       const query = cameraSearch.value.trim().toLowerCase();
-      const cameras = cameraCatalog.filter(camera => !query || camera.name.toLowerCase().includes(query));
-      if (!cameras.length) {
-        const empty = document.createElement('p'); empty.textContent = '找不到符合條件的攝影機。'; cameraGrid.append(empty); return;
+      const results = query ? cameraCatalog.filter(camera => camera.name.toLowerCase().includes(query) && !savedIds.has(camera.id)).slice(0, 30) : [];
+      if (query && !results.length && saved.length) {
+        const empty = document.createElement('p'); empty.textContent = '找不到其他符合條件的攝影機。'; cameraGrid.append(empty);
+      } else if (!saved.length && !query) {
+        const empty = document.createElement('p'); empty.textContent = '播放清單是空的。請搜尋並勾選攝影機。'; cameraGrid.append(empty);
+      } else if (query && !results.length) {
+        const empty = document.createElement('p'); empty.textContent = '找不到符合條件的攝影機。'; cameraGrid.append(empty);
       }
-      for (const camera of cameras) {
-        const card = document.createElement('article'); card.className = 'camera-card';
-        const image = document.createElement('img'); image.src = camera.imageUrl; image.alt = camera.name; image.loading = 'lazy';
-        image.addEventListener('error', () => { image.alt = `${camera.name}（目前無法載入快照）`; });
-        const content = document.createElement('div'); content.className = 'camera-card-content';
-        const title = document.createElement('h3'); title.textContent = camera.name;
-        const actions = document.createElement('div'); actions.className = 'camera-card-actions';
-        const isSaved = savedIds.has(camera.id);
-        const button = document.createElement('button'); button.type = 'button'; button.className = 'camera-add-button';
-        button.textContent = isSaved ? '移除清單' : '加入清單';
-        button.addEventListener('click', async () => {
-          if (authenticated) {
-            if (!(await saveAccountCamera(camera, isSaved))) return;
-          } else {
-            const local = readSavedCameras();
-            writeSavedCameras(isSaved ? local.filter(item => item.id !== camera.id) : [camera, ...local]);
-          }
-          await renderCameras();
-        });
-        actions.append(button); content.append(title, actions); card.append(image, content); cameraGrid.append(card);
-      }
+      for (const camera of results) cameraGrid.append(makeCameraCard(camera, false, true));
+      cameraSelectionActions.hidden = selectedCameraIds.size === 0;
     }
 
     async function showCameraView() {
       heading.textContent = '即時影像'; homeActions.hidden = true; categories.hidden = true; localListActions.hidden = true;
       playerPanel.hidden = true; radioPanel.hidden = true; cameraPanel.hidden = false; status.textContent = '';
-      await updateAccountStatus(); await loadCameraCatalog();
+      await updateAccountStatus(); await renderCameras();
     }
 
     function readRadioStations() {
@@ -2115,8 +2148,30 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     document.querySelector('[data-view="favorites"]').addEventListener('click', () => showLocalVideoList('favorites'));
     document.querySelector('[data-view="playlists"]').addEventListener('click', () => loadMyPlaylists());
     document.querySelector('[data-view="cameras"]').addEventListener('click', showCameraView);
-    cameraSearch.addEventListener('input', renderCameras);
+    cameraSearch.addEventListener('keydown', event => {
+      if (event.key === 'Enter') { event.preventDefault(); loadCameraCatalog(); }
+    });
     cameraRefresh.addEventListener('click', loadCameraCatalog);
+    cameraClearSelection.addEventListener('click', () => {
+      selectedCameraIds.clear();
+      cameraSelectionActions.hidden = true;
+      renderCameras();
+    });
+    cameraAddSelected.addEventListener('click', async () => {
+      const selected = cameraCatalog.filter(camera => selectedCameraIds.has(camera.id));
+      for (const camera of selected) {
+        if (authenticated) {
+          if (!(await saveAccountCamera(camera))) return;
+        } else {
+          const local = readSavedCameras();
+          if (!local.some(item => item.id === camera.id)) writeSavedCameras([camera, ...local]);
+        }
+      }
+      selectedCameraIds.clear();
+      cameraSelectionActions.hidden = true;
+      status.textContent = `已加入 ${selected.length} 個攝影機。`;
+      await renderCameras();
+    });
 
     document.querySelector('[data-view="radio"]').addEventListener('click', async () => {
       await updateAccountStatus();
