@@ -1585,8 +1585,24 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         const response = await fetch('/api/auth/status');
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || '無法確認登入狀態。');
+        const wasAuthenticated = authenticated;
         authenticated = data.authenticated === true;
         csrfToken = data.csrfToken || '';
+        if (!wasAuthenticated && authenticated && !updateAccountStatus.radioMigrationStarted) {
+          updateAccountStatus.radioMigrationStarted = true;
+          try {
+            const accountStations = await loadAccountRadioStations();
+            const localStations = readRadioStations();
+            for (const station of localStations) {
+              if (!accountStations.some(item => item.id === station.id || item.url === station.url)) {
+                await saveAccountRadioStation(station);
+              }
+            }
+            if (!radioPanel.hidden) renderRadioStations(await loadAccountRadioStations());
+          } catch (error) {
+            status.textContent = error.message || '無法同步瀏覽器廣播清單。';
+          }
+        }
         accountButton.disabled = data.configured !== true;
         accountButton.textContent = data.configured !== true
           ? '登入未設定'
@@ -1978,7 +1994,10 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     document.querySelector('[data-view="recent"]').addEventListener('click', () => showLocalVideoList('recent'));
     document.querySelector('[data-view="favorites"]').addEventListener('click', () => showLocalVideoList('favorites'));
     document.querySelector('[data-view="playlists"]').addEventListener('click', () => loadMyPlaylists());
-    document.querySelector('[data-view="radio"]').addEventListener('click', showRadioView);
+    document.querySelector('[data-view="radio"]').addEventListener('click', async () => {
+      await updateAccountStatus();
+      await showRadioView();
+    });
 
     radioForm.addEventListener('submit', async event => {
       event.preventDefault();
@@ -2041,6 +2060,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         await playlistApi('/api/auth/logout', { method: 'POST' });
         authenticated = false;
         csrfToken = '';
+        updateAccountStatus.radioMigrationStarted = false;
         status.textContent = '已登出 Google 帳戶。';
         await updateAccountStatus();
         document.querySelector('[data-view="popular"]').click();
