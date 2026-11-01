@@ -980,8 +980,16 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     .radio-station { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; margin-top: 10px; padding: 12px; border-radius: 10px; background: #222; }
     .radio-station strong, .radio-station small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .radio-station small { margin-top: 4px; color: #aaa; }
-    .radio-station-actions { display: flex; gap: 8px; }
-    @media (max-width: 700px) { .radio-form { grid-template-columns: 1fr; } }
+    .radio-station-actions { display: flex; gap: 10px; align-items: center; }
+    .radio-play-button { min-width: 112px; min-height: 48px; padding: 12px 20px !important; border-radius: 24px !important; color: #fff !important; background: #e53935 !important; font-size: 16px; font-weight: 700; box-shadow: 0 4px 14px rgba(229, 57, 53, .35); }
+    .radio-play-button:hover { background: #ff5252 !important; transform: translateY(-1px); }
+    .radio-play-button:active { transform: translateY(0); }
+    @media (max-width: 700px) {
+      .radio-form { grid-template-columns: 1fr; }
+      .radio-station { grid-template-columns: 1fr; padding: 16px; }
+      .radio-station-actions { width: 100%; }
+      .radio-play-button { flex: 1; min-height: 52px; }
+    }
     #categories { display: flex; gap: 10px; overflow-x: auto; padding: 2px 0 18px; }
     #categories button { flex: 0 0 auto; padding: 9px 14px; border-radius: 8px; }
     #categories button.active { color: #111; background: #f1f1f1; }
@@ -1228,7 +1236,9 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         actions.className = 'radio-station-actions';
         const play = document.createElement('button');
         play.type = 'button';
-        play.textContent = '播放';
+        play.className = 'radio-play-button';
+        play.textContent = '▶ 播放';
+        play.setAttribute('aria-label', `播放 ${station.name}`);
         play.addEventListener('click', () => playRadioStation(station));
         const remove = document.createElement('button');
         remove.type = 'button';
