@@ -1084,6 +1084,11 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     const RECENT_STORAGE_KEY = 'youtube-explorer-recent-v1';
     const FAVORITES_STORAGE_KEY = 'youtube-explorer-favorites-v1';
     const RADIO_STORAGE_KEY = 'youtube-explorer-radio-v1';
+    const DEFAULT_RADIO_STATIONS = [{
+      id: 'classic-fm-977',
+      name: '古典音樂台 FM 97.7',
+      url: 'https://onair.family977.com.tw:8977/live.mp3'
+    }];
     let activePopularUrl = '/api/popular';
     let activePopularTitle = '熱門影片';
     let currentLocalView = '';
@@ -1118,7 +1123,8 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
 
     function readRadioStations() {
       try {
-        const parsed = JSON.parse(localStorage.getItem(RADIO_STORAGE_KEY) || '[]');
+        const stored = localStorage.getItem(RADIO_STORAGE_KEY);
+        const parsed = stored === null ? DEFAULT_RADIO_STATIONS : JSON.parse(stored);
         if (!Array.isArray(parsed)) return [];
         return parsed.filter(station => station && typeof station.id === 'string' &&
           typeof station.name === 'string' && typeof station.url === 'string');
