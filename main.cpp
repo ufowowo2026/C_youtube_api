@@ -2791,7 +2791,6 @@ int main() {
             item["lon"] = camera.has("lon") ? camera["lon"].d() : 0.0;
             result["cameras"][count++] = std::move(item);
         }
-        result["cameras"].resize(count);
         return crow::response(result);
     });
 
@@ -2921,7 +2920,7 @@ int main() {
         if (!read_json_body(request, input)) return json_error(400, "廣播資訊格式不正確。");
         const std::string url = json_request_string(input, "url");
         if (!valid_public_http_url(url)) return json_error(400, "請輸入有效的 http(s) 網址。");
-        static const std::regex audio_url_pattern("\\.(?:mp3|m4a|aac)(?:\\?[^\s]*)?$", std::regex::icase);
+        static const std::regex audio_url_pattern("\\.(?:mp3|m4a|aac)(?:\\?[^\\s]*)?$", std::regex::icase);
         if (std::regex_search(url, audio_url_pattern)) {
             crow::json::wvalue result;
             result["streamUrl"] = url;
