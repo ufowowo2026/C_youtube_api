@@ -937,6 +937,14 @@ std::string resolve_page_relative_url(const std::string& page_url, const std::st
     return decode_html_attribute(page_url.substr(0, slash + 1) + candidate);
 }
 
+std::string extract_jpeg_frame(const std::string& body) {
+    const size_t start = body.find("\xFF\xD8", 0);
+    if (start == std::string::npos) return {};
+    const size_t end = body.find("\xFF\xD9", start + 2);
+    if (end == std::string::npos) return {};
+    return body.substr(start, end + 2 - start);
+}
+
 std::string resolve_radio_stream_url(const std::string& page_url, const std::string& page_html) {
     if (!valid_public_http_url(page_url)) return {};
     static const std::vector<std::regex> patterns = {
@@ -1282,7 +1290,17 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
 
     function makeCameraCard(camera, saved, selectable = false) {
       const card = document.createElement('article'); card.className = 'camera-card';
-      const image = document.createElement('img'); image.src = camera.imageUrl; image.alt = camera.name; image.loading = 'lazy';
+      const image = document.createElement('img');
+      const baseImageUrl = camera.imageUrl;
+      image.src = baseImageUrl;
+      image.alt = camera.name;
+      image.loading = 'lazy';
+      if (baseImageUrl.startsWith('/api/cameras/image')) {
+        window.setInterval(() => {
+          const separator = baseImageUrl.includes('?') ? '&' : '?';
+          image.src = baseImageUrl + separator + '_=' + Date.now();
+        }, 5000);
+      }
       const content = document.createElement('div'); content.className = 'camera-card-content';
       const title = document.createElement('h3'); title.textContent = camera.name;
       const actions = document.createElement('div'); actions.className = 'camera-card-actions';
@@ -2813,7 +2831,10 @@ int main() {
             const auto snapshot = request_http(source_url, "GET");
             if (snapshot.request_status != CURLE_OK || snapshot.http_status < 200 || snapshot.http_status >= 400)
                 return json_error(502, "無法載入攝影機快照。");
-            crow::response response(snapshot.body); response.set_header("Cache-Control", "no-store");
+            std::string image_body = snapshot.body;
+            const std::string jpeg_frame = extract_jpeg_frame(snapshot.body);
+            if (!jpeg_frame.empty()) image_body = jpeg_frame;
+            crow::response response(image_body); response.set_header("Cache-Control", "no-store");
             response.set_header("Content-Type", "image/jpeg");
             return response;
         }
