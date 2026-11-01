@@ -919,6 +919,15 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     #home-actions button, .local-list-actions button { min-height: 40px; padding: 8px 14px; border-radius: 20px; }
     #last-updated, .local-only-note { color: #aaa; }
     .local-list-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 16px; }
+    #radio-panel { margin-bottom: 20px; padding: 16px; border: 1px solid #303030; border-radius: 12px; background: #181818; }
+    #radio-player { width: 100%; margin-bottom: 12px; }
+    .radio-note { color: #aaa; }
+    .radio-form { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(220px, 2fr) auto; gap: 8px; }
+    .radio-station { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; margin-top: 10px; padding: 12px; border-radius: 10px; background: #222; }
+    .radio-station strong, .radio-station small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .radio-station small { margin-top: 4px; color: #aaa; }
+    .radio-station-actions { display: flex; gap: 8px; }
+    @media (max-width: 700px) { .radio-form { grid-template-columns: 1fr; } }
     #categories { display: flex; gap: 10px; overflow-x: auto; padding: 2px 0 18px; }
     #categories button { flex: 0 0 auto; padding: 9px 14px; border-radius: 8px; }
     #categories button.active { color: #111; background: #f1f1f1; }
@@ -1013,6 +1022,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
       <button type="button" data-view="recent">最近看過</button>
       <button type="button" data-view="favorites">我的收藏</button>
       <button type="button" data-view="playlists">我的清單</button>
+      <button type="button" data-view="radio">線上廣播</button>
     </nav>
     <main>
       <section id="player-panel" role="dialog" aria-modal="true" aria-label="影片播放器" hidden>
@@ -1022,6 +1032,15 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         <div id="player"></div>
       </section>
       <h1 id="heading">熱門影片</h1>
+      <section id="radio-panel" aria-label="線上廣播" hidden>
+        <audio id="radio-player" preload="none" controls></audio>
+        <p class="radio-note">請只新增你有權嵌入或公開播放的廣播串流。網址僅儲存在此瀏覽器，不會上傳到伺服器。</p>
+        <form id="radio-form" class="radio-form">
+          <input id="radio-name" type="text" maxlength="80" placeholder="電台名稱" aria-label="電台名稱" required>
+          <input id="radio-url" type="url" maxlength="2048" placeholder="授權串流網址" aria-label="授權串流網址" required>
+          <button type="submit">新增廣播</button>
+        </form>
+      </section>
       <div id="home-actions">
         <button id="refresh-popular" type="button">重新整理熱門影片</button>
         <span id="last-updated" aria-live="polite">尚未更新</span>
@@ -1048,6 +1067,11 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     const refreshPopularButton = document.getElementById('refresh-popular');
     const lastUpdated = document.getElementById('last-updated');
     const localListActions = document.getElementById('local-list-actions');
+    const radioPanel = document.getElementById('radio-panel');
+    const radioPlayer = document.getElementById('radio-player');
+    const radioForm = document.getElementById('radio-form');
+    const radioName = document.getElementById('radio-name');
+    const radioUrl = document.getElementById('radio-url');
     const playerPanel = document.getElementById('player-panel');
     const closePlayer = document.getElementById('close-player');
     const accountButton = document.getElementById('account-button');
@@ -1059,6 +1083,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     let csrfToken = '';
     const RECENT_STORAGE_KEY = 'youtube-explorer-recent-v1';
     const FAVORITES_STORAGE_KEY = 'youtube-explorer-favorites-v1';
+    const RADIO_STORAGE_KEY = 'youtube-explorer-radio-v1';
     let activePopularUrl = '/api/popular';
     let activePopularTitle = '熱門影片';
     let currentLocalView = '';
@@ -1089,6 +1114,103 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
         status.textContent = error.message || '無法儲存到瀏覽器本機，請檢查儲存空間或瀏覽器設定。';
         return false;
       }
+    }
+
+    function readRadioStations() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(RADIO_STORAGE_KEY) || '[]');
+        if (!Array.isArray(parsed)) return [];
+        return parsed.filter(station => station && typeof station.id === 'string' &&
+          typeof station.name === 'string' && typeof station.url === 'string');
+      } catch (error) {
+        return [];
+      }
+    }
+
+    function writeRadioStations(stations) {
+      try {
+        localStorage.setItem(RADIO_STORAGE_KEY, JSON.stringify(stations));
+        return true;
+      } catch (error) {
+        status.textContent = '無法儲存廣播清單。';
+        return false;
+      }
+    }
+
+    function validRadioUrl(value) {
+      try {
+        const url = new URL(value);
+        return url.protocol === 'http:' || url.protocol === 'https:';
+      } catch (error) {
+        return false;
+      }
+    }
+
+    function renderRadioStations() {
+      videos.replaceChildren();
+      const stations = readRadioStations();
+      if (!stations.length) {
+        const empty = document.createElement('p');
+        empty.textContent = '尚未新增廣播。請先填寫電台名稱與授權串流網址。';
+        videos.append(empty);
+      }
+      for (const station of stations) {
+        const row = document.createElement('article');
+        row.className = 'radio-station';
+        const info = document.createElement('div');
+        info.className = 'radio-station-info';
+        const name = document.createElement('strong');
+        name.textContent = station.name;
+        const url = document.createElement('small');
+        url.textContent = station.url;
+        info.append(name, url);
+        const actions = document.createElement('div');
+        actions.className = 'radio-station-actions';
+        const play = document.createElement('button');
+        play.type = 'button';
+        play.textContent = '播放';
+        play.addEventListener('click', () => playRadioStation(station));
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.textContent = '刪除';
+        remove.addEventListener('click', () => {
+          if (!writeRadioStations(readRadioStations().filter(item => item.id !== station.id))) return;
+          if (radioPlayer.dataset.stationId === station.id) {
+            radioPlayer.pause();
+            radioPlayer.removeAttribute('src');
+            radioPlayer.load();
+          }
+          renderRadioStations();
+        });
+        actions.append(play, remove);
+        row.append(info, actions);
+        videos.append(row);
+      }
+    }
+
+    function playRadioStation(station) {
+      status.textContent = `正在連線：${station.name}`;
+      radioPlayer.dataset.stationId = station.id;
+      radioPlayer.src = station.url;
+      radioPlayer.play().then(() => {
+        status.textContent = `正在播放：${station.name}`;
+        if ('mediaSession' in navigator) {
+          navigator.mediaSession.metadata = new MediaMetadata({ title: station.name, artist: '線上廣播' });
+        }
+      }).catch(() => {
+        status.textContent = '無法播放此串流，請確認網址、授權與瀏覽器支援的格式。';
+      });
+    }
+
+    function showRadioView() {
+      heading.textContent = '線上廣播';
+      homeActions.hidden = true;
+      categories.hidden = true;
+      localListActions.hidden = true;
+      playerPanel.hidden = true;
+      radioPanel.hidden = false;
+      status.textContent = '';
+      renderRadioStations();
     }
 
     function localVideoRecord(item) {
@@ -1423,6 +1545,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     async function loadMyPlaylists(pageToken = '') {
       heading.textContent = '我的 YouTube 播放清單';
       currentLocalView = '';
+      radioPanel.hidden = true;
       homeActions.hidden = true;
       localListActions.hidden = true;
       categories.replaceChildren();
@@ -1593,6 +1716,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     async function loadVideoList(url, title) {
       heading.textContent = title;
       currentLocalView = '';
+      radioPanel.hidden = true;
       homeActions.hidden = !url.startsWith('/api/popular');
       localListActions.hidden = true;
       categories.hidden = !url.startsWith('/api/popular');
@@ -1634,6 +1758,7 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     function showLocalVideoList(type) {
       const isRecent = type === 'recent';
       currentLocalView = type;
+      radioPanel.hidden = true;
       homeActions.hidden = true;
       categories.replaceChildren();
       categories.hidden = true;
@@ -1743,6 +1868,37 @@ const char* HOME_PAGE = R"html(<!DOCTYPE html>
     document.querySelector('[data-view="recent"]').addEventListener('click', () => showLocalVideoList('recent'));
     document.querySelector('[data-view="favorites"]').addEventListener('click', () => showLocalVideoList('favorites'));
     document.querySelector('[data-view="playlists"]').addEventListener('click', () => loadMyPlaylists());
+    document.querySelector('[data-view="radio"]').addEventListener('click', showRadioView);
+
+    radioForm.addEventListener('submit', event => {
+      event.preventDefault();
+      const name = radioName.value.trim();
+      const url = radioUrl.value.trim();
+      if (!name || !validRadioUrl(url)) {
+        status.textContent = '請輸入有效的廣播名稱與 http(s) 串流網址。';
+        return;
+      }
+      const stations = readRadioStations();
+      if (stations.some(station => station.url === url)) {
+        status.textContent = '此廣播網址已存在。';
+        return;
+      }
+      const id = window.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+      if (!writeRadioStations([{ id, name, url }, ...stations].slice(0, 100))) return;
+      radioForm.reset();
+      status.textContent = '已新增廣播。';
+      renderRadioStations();
+    });
+
+    radioPlayer.addEventListener('error', () => {
+      if (radioPlayer.dataset.stationId) status.textContent = '廣播串流載入失敗，請確認串流網址與授權。';
+    });
+
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.setActionHandler('play', () => radioPlayer.play().catch(() => {}));
+      navigator.mediaSession.setActionHandler('pause', () => radioPlayer.pause());
+    }
+
     accountButton.addEventListener('click', async () => {
       if (!authenticated) {
         window.location.href = '/auth/google';
